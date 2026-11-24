@@ -5125,6 +5125,36 @@ html[data-theme="light-legacy"] .sb-reload { background: #fff; }
 }
 .ps-open:hover { filter: brightness(1.04); }
 
+/* ---------- 首页概览 · 一周活动（2026-11-24 真实数据） ---------- */
+.ps-home { display: flex; flex-direction: column; gap: 6px; overflow: hidden; }
+.ps-hd { display: flex; align-items: center; gap: 8px; flex-shrink: 0; min-height: 20px; }
+.ps-topws {
+  display: inline-flex; align-items: center; gap: 5px; min-width: 0;
+  font-size: 11px; color: var(--ps-muted, #a08a7b);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ps-topws b { color: var(--ps-ink, #4a2a12); font-size: 11.5px; margin-left: 2px; }
+.ps-balance { margin-left: auto; flex-shrink: 0; font-size: 11px; color: var(--ps-muted, #a08a7b); white-space: nowrap; }
+.ps-balance b { color: var(--ps-ink, #4a2a12); font-size: 13px; margin-left: 3px; }
+.ps-week { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: center; }
+.ps-week-head { display: flex; align-items: baseline; gap: 8px; flex-shrink: 0; font-size: 10.5px; color: var(--ps-muted, #a08a7b); }
+.ps-week-title { font-weight: 700; color: var(--ps-ink, #4a2a12); font-size: 11px; }
+.ps-week-sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ps-chart {
+  position: relative; flex: 0 0 auto; height: 136px; margin: 6px 2px 18px;
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px;
+}
+.ps-base { position: absolute; left: 0; right: 0; top: 50%; height: 2px; background: rgba(120, 90, 60, .22); }
+.ps-col { position: relative; height: 100%; }
+.ps-track { position: absolute; left: 50%; transform: translateX(-50%); top: 0; bottom: 0; width: 12px; background: rgba(120, 90, 60, .05); }
+.ps-up, .ps-down { position: absolute; left: 50%; transform: translateX(-50%); width: 22px; box-sizing: border-box; }
+.ps-up { bottom: 50%; background: #ff2e9a; border: 2px solid #141413; border-bottom: 0; }
+.ps-down { top: 50%; background: #00e8ff; border: 2px solid #141413; border-top: 0; }
+.ps-day {
+  position: absolute; left: 0; right: 0; bottom: -16px; text-align: center;
+  font-size: 9px; color: var(--ps-muted, #a08a7b); white-space: nowrap;
+}
+
 /* ---------- 我的好友 ---------- */
 .ps-friend-list { display: flex; flex-direction: column; gap: 2px; overflow: auto; min-height: 0; }
 .ps-friend-row { display: flex; align-items: center; gap: 10px; padding: 5px 4px; border-radius: 10px; }
@@ -5201,3 +5231,19 @@ html[data-theme="light-legacy"] .sb-reload { background: #fff; }
 .kneu-rootmenu { position: absolute; z-index: 9; display: none; }
 .kneu-rootbtn { padding: 5px 10px; background: rgba(12,18,30,.95); color: var(--text); border: 1px solid var(--border); border-radius: 6px; font-size: 11px; cursor: pointer; white-space: nowrap; }
 .kneu-rootbtn:disabled { opacity: .45; cursor: default; }
+
+/* ============================================================================
+   场景切换过渡（2026-11-24）
+   画布内一层「底色幕布」淡入 → 换场景 → 淡出。不做位移 / 色块横扫，只做透明度过渡。
+   覆盖层挂在 #scenario-view 里，标题栏 / 场景栏不参与；pointer-events:none。
+   ============================================================================ */
+#scenario-view { position: relative; }
+#scene-transition {
+  position: absolute; inset: 0; z-index: 88888;
+  display: none; pointer-events: none;
+  background: var(--mem-canvas, #0e0c10);
+  opacity: 0;
+}
+#scene-transition.on { display: block; }
+#scene-transition.in { opacity: 1; transition: opacity .16s ease-out; }
+#scene-transition.out { opacity: 0; transition: opacity .28s cubic-bezier(.4, 0, .2, 1); }

@@ -73,6 +73,15 @@ contextBridge.exposeInMainWorld('app', {
     pickFolder: () => ipcRenderer.invoke('neuron:pick-folder'),
     scan: (root) => ipcRenderer.invoke('neuron:scan-folder', root)
   },
+  // 个人站场景：控制室项目 / 已归档项目 / 最近修改文件（2026-11-24）
+  // 缺这个命名空间 = 主进程还是旧的 ⇒ 重启一次工作台；面板会先提示、不会白屏。
+  ps: {
+    projects: () => ipcRenderer.invoke('ps:projects'),
+    archived: () => ipcRenderer.invoke('ps:archived'),
+    recentFiles: (dir, limit) => ipcRenderer.invoke('ps:recent-files', dir, limit),
+    home: () => ipcRenderer.invoke('ps:home'),
+    balance: () => ipcRenderer.invoke('ps:balance')
+  },
   listScenarios: () => ipcRenderer.invoke('scenarios:list'),
   getScenario: (id) => ipcRenderer.invoke('scenario:get', id),
   // ---- 设置：读取 / 打开 Harness 配置文件 ----

@@ -23,6 +23,7 @@ const webview = document.getElementById('harness-webview');
 const tabsNav = document.getElementById('scenario-tabs');
 
 let currentTab = null;
+let sceneShown = '';   // 当前真正渲染在 #grid 里的场景 id（过渡动画用它判断是否需要排队）
 // 底部菜单栏：序号徽标显隐（模块级，loadScenario 重渲染后保持）——默认关闭
 let badgesOn = false;
 
@@ -636,7 +637,7 @@ window.__dshReloadScene = reloadScene;
     try {
       if (!id) return false;
       currentTab = id;
-      Promise.resolve(loadScenario(id)).catch(function () { /* ignore */ });
+      Promise.resolve(switchScene(id)).catch(function () { /* ignore */ });
       return true;
     } catch (e) { return false; }
   };
@@ -839,6 +840,65 @@ function showView(name) {
   scenarioView.classList.toggle('active', name === 'scenario');
 }
 
+// ---------- 场景切换过渡：画布内「底色幕布」淡入 → 换场景 → 淡出 ----------
+// 只做透明度，不做位移/色块横扫（用户要求"别太夸张，流畅渐入淡出"）。
+// 只包「用户主动切场景」这一条路（点标签 / ⋯ 菜单直达）；⟳ 刷新、启动首个场景不播。
+// 幕布挂在 #scenario-view 里（标题栏 / 场景栏不参与）；pointer-events:none，不碰 webview。
+let sceneSwitchBusy = false;
+let sceneSwitchQueued = '';
+const sceneSwitchSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function prefersReducedMotion() {
+  try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; }
+}
+function sceneTransitionEl() {
+  let ov = document.getElementById('scene-transition');
+  if (ov) return ov;
+  ov = document.createElement('div');
+  ov.id = 'scene-transition';
+  ov.setAttribute('aria-hidden', 'true');
+  // 只盖画布：挂在 #scenario-view 里（标题栏 / 场景栏保持可见）
+  if (scenarioView && scenarioView.appendChild) scenarioView.appendChild(ov);
+  else document.body.appendChild(ov);
+  return ov;
+}
+async function switchScene(id) {
+  if (!id) return;
+  if (sceneSwitchBusy) { sceneSwitchQueued = id; return; }
+  // 点的是当前已显示的场景 = 原地重刷，不放过渡动画（否则白闪一次）
+  if (id === sceneShown) {
+    try { await loadScenario(id); } catch (err) { bootFail('刷新场景', err); }
+    return;
+  }
+  sceneSwitchBusy = true;
+  const ov = sceneTransitionEl();
+  try {
+    if (prefersReducedMotion()) {
+      try { await loadScenario(id); } catch (err) { bootFail('切换场景', err); }
+    } else {
+      // 幕布用当前画布底色（浅色米黄 / 深色近黑 / 个人站暖底都自动适配）
+      try {
+        const bg = getComputedStyle(grid).backgroundColor;
+        if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') ov.style.background = bg;
+      } catch (e) { /* 取不到就用 CSS 里的默认值 */ }
+      ov.classList.remove('out');
+      ov.classList.add('on');
+      void ov.offsetWidth;               // 先让 opacity:0 生效，再加 .in 才走过渡
+      ov.classList.add('in');
+      await sceneSwitchSleep(170);        // 淡出到画布底色
+      try { await loadScenario(id); } catch (err) { bootFail('切换场景', err); }
+      ov.classList.remove('in');
+      ov.classList.add('out');
+      await sceneSwitchSleep(290);        // 新场景淡入
+      ov.classList.remove('on', 'out');
+    }
+  } finally {
+    sceneSwitchBusy = false;
+    const q = sceneSwitchQueued;
+    sceneSwitchQueued = '';
+    if (q && q !== sceneShown) switchScene(q);
+  }
+}
+
 // 场景 0：加载 Harness（带 token）
 // 注意：引擎未就绪时不再直接返回空界面——保留加载页进度条，
 // 引擎就绪后由 onHarnessReady 自动触发加载（原来必须手动点一次标签才会加载）。
@@ -1008,6 +1068,7 @@ async function loadScenario(id) {
   activeCleanups = [];
   const sc = await window.app.getScenario(id);
   if (!sc) return;
+  sceneShown = id;
   // 场景可自定网格列数（`cols`，默认 4 = styles.css 里 #grid 的列数）。放在前面算，是因为下面"独立窗口占位卡"
   // 那条分支会提前 return —— 列数得跟当前场景一致，不能留着上个场景的（占位卡自己写了 grid-column:1/-1，不受影响）。
   // 平时用不到；需要"某个窗口占五分之三 / 五分之二"这种比例时才写（例：20 列 ⇒ 12/20 = 3/5、8/20 = 2/5，
@@ -1339,7 +1400,7 @@ async function init() {
       if (detachedScenes.has(s.id) && forceLocalScene !== s.id) {
         try { window.app.win.openScene(s.id); } catch (e) { /* ignore */ }
       }
-      loadScenario(s.id);
+      switchScene(s.id);
     });
     // 右键标签 = 在新窗口打开（与标签上的 ⧉ 等价）
     t.addEventListener('contextmenu', (ev) => {

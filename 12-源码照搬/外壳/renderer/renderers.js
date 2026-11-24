@@ -1,4 +1,4 @@
-﻿// 工作台 — 渲染层主逻辑（多场景版）
+// 工作台 — 渲染层主逻辑（多场景版）
 // 场景 0：DSH 引擎（默认初始界面，webview 内嵌，带 token）
 // 场景 1..N：本地场景（scenarios/*.json 配置 + renderers 分发）
 // 顶层声明一律用 var：刷新按钮会带时间戳重复加载本文件，const/let 重复声明会直接报错导致热更新失效
@@ -11472,129 +11472,251 @@ var psFileRow = (f) => {
   return row;
 };
 var psEmpty = (text) => el('div', 'ps-empty', text || '（暂无数据）');
+// —— 个人站：真实数据用的格式化助手（2026-11-24） ——
+var psFmtSize = function (n) {
+  n = Number(n) || 0;
+  if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GB';
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  if (n >= 1024) return Math.round(n / 1024) + ' KB';
+  return n + ' B';
+};
+var psFmtTokens = function (n) {
+  n = Number(n) || 0;
+  if (n >= 1e8) return (n / 1e8).toFixed(2) + ' 亿';
+  if (n >= 1e4) return (n / 1e4).toFixed(1) + ' 万';
+  return String(Math.round(n));
+};
+var psFmtWhen = function (ms) {
+  if (!ms) return '—';
+  var d = new Date(ms);
+  var p = function (x) { return (x < 10 ? '0' : '') + x; };
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+};
+var psRelTime = function (ms) {
+  if (!ms) return '无对话';
+  var diff = Date.now() - ms;
+  if (diff < 60000) return '刚刚';
+  if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前';
+  if (diff < 604800000) return Math.floor(diff / 86400000) + ' 天前';
+  return psFmtWhen(ms).slice(0, 5);
+};
+// 主进程的新接口（旧进程没有 window.app.ps ⇒ 面板给提示，不白屏）
+var psApi = function () { return (window.app && window.app.ps) || null; };
+var psOpenDir = function (dir) {
+  try {
+    var ap = window.app;
+    if (ap && ap.app && ap.app.openPath) { ap.app.openPath(dir); return; }
+    if (ap && ap.site && ap.site.openFolder) { ap.site.openFolder(dir); return; }
+  } catch (e) { /* ignore */ }
+};
 
-// 首页概览：两张小卡 + 一张通栏卡（配色/圆角都在 CSS 里，这里只出结构）
+// 首页概览（2026-11-24 改为真实数据）：过去 7 天的 Token / 交付 / API 请求柱状图
+// + 吃 Token 大户（左上）+ 账户充值余额（右上）。柱状图仿控制室「看板」：Token 向上、交付向下。
 renderers['ps-home'] = (body, meta) => {
   body.classList.add('ps-body', 'ps-home');
-  const d = meta.data || {};
-  const cards = Array.isArray(d.cards) ? d.cards : [];
-  const normal = cards.filter(function (c) { return !c.wide; });
-  const wide = cards.filter(function (c) { return c.wide; });
-  if (d.eyebrow) body.appendChild(el('div', 'ps-eyebrow', d.eyebrow));
 
-  const card = (c) => {
-    const box = el('div', 'ps-card' + (c.wide ? ' ps-card-wide' : ''));
-    const top = el('div', 'ps-card-top');
-    top.appendChild(el('span', 'ps-dot tone-' + (c.tone || 'blue')));
-    top.appendChild(el('span', 'ps-card-label', c.label || ''));
-    box.appendChild(top);
-    box.appendChild(el('div', 'ps-card-ic tone-' + (c.tone || 'blue'), c.icon || '🔔'));
-    if (c.value) box.appendChild(el('div', 'ps-card-value', c.value));
-    if (c.hint) box.appendChild(el('div', 'ps-card-hint', c.hint));
-    return box;
-  };
+  const hd = el('div', 'ps-hd');
+  const topws = el('div', 'ps-topws', '🔥 吃 Token 大户 · 统计中…');
+  const balance = el('div', 'ps-balance', '充值余额 —');
+  hd.appendChild(topws);
+  hd.appendChild(balance);
+  body.appendChild(hd);
 
-  const row = el('div', 'ps-home-row');
-  normal.forEach(function (c) { row.appendChild(card(c)); });
-  if (normal.length) body.appendChild(row);
-  wide.forEach(function (c) { body.appendChild(card(c)); });
-  if (!cards.length) body.appendChild(psEmpty('（首页卡片还没配置：往 panel.data.cards 里加）'));
+  const week = el('div', 'ps-week');
+  const whead = el('div', 'ps-week-head');
+  whead.appendChild(el('span', 'ps-week-title', '过去 7 天'));
+  const wsum = el('span', 'ps-week-sum', '读取中…');
+  whead.appendChild(wsum);
+  week.appendChild(whead);
+  const chart = el('div', 'ps-chart');
+  week.appendChild(chart);
+  body.appendChild(week);
+
+  const api = psApi();
+
+  // ---- 余额：引擎账号 RPC（充值钱包 / 赠送钱包），不依赖 DEEPSEEK_API_KEY ----
+  if (api && api.balance) {
+    api.balance().then(function (b) {
+      if (!b) return;
+      if (b.ok) {
+        balance.textContent = '充值余额 ';
+        balance.appendChild(el('b', '', '¥' + (Number(b.toppedUp) || 0).toFixed(2)));
+        balance.title = '赠送余额 ¥' + (Number(b.bonus) || 0).toFixed(2);
+      } else {
+        balance.textContent = '充值余额 —';
+        balance.title = b.err || '读取失败';
+      }
+    }).catch(function (e) {
+      balance.textContent = '充值余额 —';
+      balance.title = (e && e.message) || '读取失败';
+    });
+  } else {
+    balance.title = '这个版本没有余额接口';
+  }
+
+  // ---- 7 天柱状图 ----
+  if (!api || !api.home) {
+    wsum.textContent = '这个版本还没有个人站数据接口：重启一次工作台后生效';
+    return;
+  }
+  api.home().then(function (r) {
+    chart.innerHTML = '';
+    if (!r || !r.ok) { wsum.textContent = '读不到会话数据'; return; }
+    const days = r.days || [];
+    const maxTok = Math.max(1, ...days.map(function (d) { return d.tokens; }));
+    const maxTask = Math.max(1, ...days.map(function (d) { return d.tasks; }));
+    days.forEach(function (d) {
+      const col = el('div', 'ps-col');
+      col.title = d.day + ' · Token ' + psFmtTokens(d.tokens)
+        + ' · 交付 ' + d.tasks + ' 个 · API 请求 ' + d.requests + ' 次';
+      col.appendChild(el('span', 'ps-track'));
+      const up = el('span', 'ps-up');
+      up.style.height = Math.round((d.tokens / maxTok) * 46) + '%';
+      const down = el('span', 'ps-down');
+      down.style.height = Math.round((d.tasks / maxTask) * 46) + '%';
+      col.appendChild(up);
+      col.appendChild(down);
+      col.appendChild(el('span', 'ps-day', d.label + ' ' + d.date));
+      chart.appendChild(col);
+    });
+    chart.appendChild(el('span', 'ps-base'));
+    const t = r.totals || { tokens: 0, tasks: 0, requests: 0 };
+    wsum.textContent = 'Token ' + psFmtTokens(t.tokens) + ' · 交付 ' + t.tasks + ' 个 · API 请求 ' + t.requests + ' 次';
+    if (r.topWorkspace && r.topWorkspace.tokens) {
+      topws.textContent = '🔥 吃 Token 大户 · ' + r.topWorkspace.title + ' ';
+      topws.appendChild(el('b', '', psFmtTokens(r.topWorkspace.tokens)));
+      topws.title = '过去 7 天消耗 Token 最多的工作区';
+    } else {
+      topws.textContent = '🔥 吃 Token 大户 · 暂无数据';
+    }
+  }).catch(function (e) {
+    wsum.textContent = '读取失败：' + ((e && e.message) || e);
+  });
 };
 
-// 最近文件：标题行右侧「多端同步(N) ›」，内容区一个文件堆插画 + 文件行
+// 最近文件：显示「命令」页记忆神经元里「📁 文件夹…」打开的目录下、最近修改的几个文件
+// 目录来源：神经元 loadFolder 时写的 localStorage['kneu.lastRoot']（根目录），
+// 兼容老版本按面板存的 kneuNavRoot / kneuFolder（cmd-neuron）。
 renderers['ps-recent'] = (body, meta, head) => {
   body.classList.add('ps-body', 'ps-recent');
-  const d = meta.data || {};
-  if (d.badge) {
-    const b = el('span', 'ps-head-badge', d.badge + ' ›');
-    b.title = '多端同步的文件数（占位数据）';
-    psHeadActs(head, [b]);
-  }
+  const badge = el('span', 'ps-head-badge', '最近修改 ›');
+  psHeadActs(head, [badge]);
   body.appendChild(el('div', 'ps-illus'));
   const list = el('div', 'ps-file-list');
-  (d.files || []).forEach(function (f) { list.appendChild(psFileRow(f)); });
-  if (!(d.files || []).length) list.appendChild(psEmpty());
   body.appendChild(list);
+  const show = function (text, title) {
+    list.innerHTML = '';
+    const e = psEmpty(text);
+    if (title) e.title = title;
+    list.appendChild(e);
+  };
+  let dir = '';
+  try {
+    dir = localStorage.getItem('kneu.lastRoot')
+      || localStorage.getItem('kneuNavRoot:cmd-neuron')
+      || localStorage.getItem('kneuFolder:cmd-neuron') || '';
+  } catch (e) { /* ignore */ }
+  if (!dir) { show('还没打开文件夹：到「命令」页点「📁 文件夹…」选一个目录'); return; }
+  const base = dir.split(/[\\/]/).filter(Boolean).pop() || dir;
+  badge.textContent = base + ' ›';
+  badge.title = dir;
+  const api = psApi();
+  if (!api) { show('这个版本还没有个人站数据接口：重启一次工作台后生效'); return; }
+  show('正在读取最近修改…');
+  api.recentFiles(dir, 7).then(function (r) {
+    list.innerHTML = '';
+    if (!r || !r.ok) { list.appendChild(psEmpty((r && r.err) || '读不到这个目录（可能已被移动或删除）')); return; }
+    const files = r.files || [];
+    if (!files.length) { list.appendChild(psEmpty('这个目录里还没有文件')); return; }
+    files.forEach(function (f) {
+      const row = psFileRow({ dir: false, name: f.name, size: psFmtSize(f.size), time: psFmtWhen(f.mtime) });
+      row.title = (f.rel || f.name) + '\n' + psFmtSize(f.size) + ' · ' + psFmtWhen(f.mtime);
+      list.appendChild(row);
+    });
+    badge.textContent = base + ' · ' + files.length + ' 个 ›';
+    badge.title = dir + '\n（共 ' + (r.total || files.length) + ' 个文件，按修改时间取最近的 ' + files.length + ' 个）';
+  }).catch(function (e) {
+    show('读取失败：' + ((e && e.message) || e));
+  });
 };
 
-// 本地文件：一个「根目录」胶囊 + 文件行 + 目录行（对应图右侧那列「目录」）
+// 本地文件：只列「已归档项目」的文件夹（不显示文件），附带对话数 / 消耗 token
+// 数据源：主进程 ps:archived —— 桌面版 DSH 工作区里目录已不存在的项目（判定见 main.js psIsArchived）
 renderers['ps-files'] = (body, meta) => {
   body.classList.add('ps-body', 'ps-files');
-  const d = meta.data || {};
   const chip = el('div', 'ps-folder-chip');
   chip.appendChild(el('span', 'ps-folder-ic', '📁'));
-  chip.appendChild(el('span', 'ps-folder-name', d.root || '本地目录'));
+  const chipName = el('span', 'ps-folder-name', '已归档项目');
+  chip.appendChild(chipName);
   body.appendChild(chip);
-  const wrap = el('div', 'ps-files-cols');
-  const left = el('div', 'ps-file-list');
-  (d.files || []).forEach(function (f) { left.appendChild(psFileRow(f)); });
-  if (!(d.files || []).length) left.appendChild(psEmpty('（这个目录是空的）'));
-  wrap.appendChild(left);
-  const right = el('div', 'ps-dir-list');
-  (d.dirs || []).forEach(function (name) { right.appendChild(el('div', 'ps-dir-row', name)); });
-  wrap.appendChild(right);
-  body.appendChild(wrap);
+  const list = el('div', 'ps-file-list');
+  list.style.flex = '1';
+  body.appendChild(list);
+  const api = psApi();
+  if (!api) { list.appendChild(psEmpty('这个版本还没有个人站数据接口：重启一次工作台后生效')); return; }
+  list.appendChild(psEmpty('正在读取已归档项目…'));
+  api.archived().then(function (r) {
+    list.innerHTML = '';
+    const projects = (r && r.projects) || [];
+    if (!projects.length) {
+      chipName.textContent = '暂无已归档项目';
+      list.appendChild(psEmpty('（控制室里没有已归档的项目）'));
+      return;
+    }
+    chipName.textContent = '已归档 · ' + projects.length + ' 个项目';
+    projects.forEach(function (p) {
+      const row = psFileRow({
+        dir: true,
+        name: p.title || p.dir || '未命名',
+        size: p.sessions + ' 个对话',
+        time: psFmtTokens(p.tokens) + ' tokens'
+      });
+      row.title = (p.path || '')
+        + '\n对话 ' + p.sessions + ' 个 · 消耗 ' + psFmtTokens(p.tokens) + ' tokens'
+        + '（含缓存总计 ' + psFmtTokens(p.tokensTotal) + '）';
+      list.appendChild(row);
+    });
+  }).catch(function (e) {
+    list.innerHTML = '';
+    list.appendChild(psEmpty('读取失败：' + ((e && e.message) || e)));
+  });
 };
 
-// 项目管理：一张卡片 = 图标 + 状态 + 名字 + 描述 + 打开按钮
+// 项目管理：控制室里的项目（桌面版 DSH 工作区），按最后一次对话时间倒序
+// UI 保持原样：一张卡片 = 图标 + 状态（最近对话时间）+ 名字 + 描述（对话数）+ 打开按钮
 renderers['ps-projects'] = (body, meta) => {
   body.classList.add('ps-body', 'ps-projects');
-  const d = meta.data || {};
   const list = el('div', 'ps-proj-list');
-  (d.projects || []).forEach(function (p) {
-    const card = el('div', 'ps-proj-card');
-    card.appendChild(el('div', 'ps-proj-ic', p.icon || '🧩'));
-    const info = el('div', 'ps-proj-info');
-    if (p.status) info.appendChild(psPill(p.status, String(p.status).indexOf('已') === 0));
-    const nameRow = el('div', 'ps-proj-name-row');
-    nameRow.appendChild(el('span', 'ps-proj-name', p.name || '未命名项目'));
-    if (p.desc) nameRow.appendChild(el('span', 'ps-proj-desc', '· ' + p.desc));
-    info.appendChild(nameRow);
-    card.appendChild(info);
-    const btn = el('button', 'ps-open', '▶ 打开');
-    btn.type = 'button';
-    btn.title = p.path ? ('本地目录：' + p.path) : '占位按钮（没有配 path）';
-    btn.addEventListener('click', function () {
-      // 占位实现：真有目录就走外壳的「打开文件夹」，没有就提示
-      const ap = window.app;
-      if (p.path && ap && ap.site && ap.site.openFolder) { try { ap.site.openFolder(p.path); return; } catch (e) { /* ignore */ } }
-      btn.textContent = '占位';
-      setTimeout(function () { btn.textContent = '▶ 打开'; }, 1200);
+  body.appendChild(list);
+  const api = psApi();
+  if (!api) { list.appendChild(psEmpty('这个版本还没有个人站数据接口：重启一次工作台后生效')); return; }
+  list.appendChild(psEmpty('正在读取控制室项目…'));
+  api.projects().then(function (r) {
+    list.innerHTML = '';
+    const projects = (r && r.projects) || [];
+    if (!projects.length) { list.appendChild(psEmpty('（控制室里还没有项目）')); return; }
+    projects.forEach(function (p) {
+      const card = el('div', 'ps-proj-card');
+      card.appendChild(el('div', 'ps-proj-ic', '🧩'));
+      const info = el('div', 'ps-proj-info');
+      info.appendChild(psPill(psRelTime(p.last), false));
+      const nameRow = el('div', 'ps-proj-name-row');
+      nameRow.appendChild(el('span', 'ps-proj-name', p.title || '未命名项目'));
+      nameRow.appendChild(el('span', 'ps-proj-desc', '· ' + (p.sessions ? (p.sessions + ' 个对话') : '还没有对话')));
+      info.appendChild(nameRow);
+      card.appendChild(info);
+      const btn = el('button', 'ps-open', '▶ 打开');
+      btn.type = 'button';
+      btn.title = '本地目录：' + (p.path || '');
+      btn.addEventListener('click', function () { psOpenDir(p.path); });
+      card.appendChild(btn);
+      list.appendChild(card);
     });
-    card.appendChild(btn);
-    list.appendChild(card);
+  }).catch(function (e) {
+    list.innerHTML = '';
+    list.appendChild(psEmpty('读取失败：' + ((e && e.message) || e)));
   });
-  if (!(d.projects || []).length) list.appendChild(psEmpty('（暂无项目）'));
-  body.appendChild(list);
-};
-
-// 我的好友：标题行「3/1000 · 更多」，内容区头像 + 名字 + 一句话 + 在线状态
-renderers['ps-friends'] = (body, meta, head) => {
-  body.classList.add('ps-body', 'ps-friends');
-  const d = meta.data || {};
-  const acts = [];
-  if (d.quota) acts.push(el('span', 'ps-head-badge', '👥 ' + d.quota));
-  const more = el('button', 'ps-link', '更多');
-  more.type = 'button';
-  more.addEventListener('click', function () {
-    more.textContent = '占位';
-    setTimeout(function () { more.textContent = '更多'; }, 1200);
-  });
-  acts.push(more);
-  psHeadActs(head, acts);
-  const list = el('div', 'ps-friend-list');
-  (d.friends || []).forEach(function (f) {
-    const row = el('div', 'ps-friend-row');
-    row.appendChild(el('div', 'ps-avatar', f.icon || '🙂'));
-    const info = el('div', 'ps-friend-info');
-    info.appendChild(el('div', 'ps-friend-name', f.name || ''));
-    info.appendChild(el('div', 'ps-friend-msg', f.msg || ''));
-    row.appendChild(info);
-    if (f.status) row.appendChild(psPill(f.status, f.status === '在线'));
-    list.appendChild(row);
-  });
-  if (!(d.friends || []).length) list.appendChild(psEmpty('（还没有好友）'));
-  body.appendChild(list);
 };
 
 // ---- 暴露给外壳（renderer.js）的热更新接口 ----
@@ -18989,6 +19111,8 @@ renderers.neuron = (body, meta, head) => {
       try {
         localStorage.setItem('kneuFolder:' + folderPid(), folderRoot);
         localStorage.setItem('kneuNavRoot:' + folderPid(), navRoot);
+        // 供「个人站 · 最近文件」读取：命令页当前打开的根目录
+        localStorage.setItem('kneu.lastRoot', navRoot);
       } catch (e) { /* ignore */ }
       updateBreadcrumb();
       try { syncEditCardBox(); } catch (e) { /* ignore */ }
@@ -19025,6 +19149,7 @@ renderers.neuron = (body, meta, head) => {
     if (headNote) headNote.textContent = '共享记忆 · 只读';
     try { localStorage.removeItem('kneuFolder:' + folderPid()); } catch (e) { /* ignore */ }
     try { localStorage.removeItem('kneuNavRoot:' + folderPid()); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem('kneu.lastRoot'); } catch (e) { /* ignore */ }
     // 联动：告诉 DSH 面板退出「文件夹工作区」模式，恢复原来的会话钉住
     try { document.dispatchEvent(new CustomEvent('kneu:memory')); } catch (e) { /* ignore */ }
     return load();

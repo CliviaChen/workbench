@@ -515,6 +515,25 @@ input::placeholder, textarea::placeholder { color: var(--mem-text-dim); }
 .ps-eyebrow { color: var(--mem-text-dim); font-family: var(--mem-display); letter-spacing: .16em; }
 .ps-empty { color: var(--mem-text-dim); }
 
+/* 首页概览 · 一周活动（2026-11-24 真实数据：Token 向上 / 交付向下） */
+#grid[data-scenario="personal-site"] .ps-home { overflow: hidden; }
+.ps-topws { color: var(--mem-text-dim); font-family: var(--mem-display); }
+.ps-topws b { color: var(--mem-text); }
+.ps-balance { color: var(--mem-text-dim); font-family: var(--mem-display); }
+.ps-balance b {
+  color: var(--mem-ink); background: var(--mem-lime);
+  border: 2px solid var(--mem-ink); padding: 1px 6px;
+  box-shadow: 2px 2px 0 var(--mem-shadow);
+}
+.ps-week-head { color: var(--mem-text-dim); font-family: var(--mem-display); }
+.ps-week-title { color: var(--mem-text); }
+.ps-week-sum { color: var(--mem-text-dim); }
+.ps-base { background: color-mix(in srgb, var(--mem-text) 30%, transparent); }
+.ps-track { background: color-mix(in srgb, var(--mem-text) 8%, transparent); }
+.ps-up { background: var(--mem-magenta); border: 2px solid var(--mem-ink); border-bottom: 0; }
+.ps-down { background: var(--mem-cyan); border: 2px solid var(--mem-ink); border-top: 0; }
+.ps-day { color: var(--mem-text-dim); font-family: var(--mem-display); }
+
 /* ---------------------------------------------------------------- 9. 面板里的通用小控件 */
 .kneu-searchwrap, .kneu-btn, .kneu-detail,
 .tbs-pill, .lm-pill, .sb-reload, .mcp-badge,

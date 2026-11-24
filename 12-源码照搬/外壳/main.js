@@ -11,6 +11,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 const DSH_PORT = String(process.env.DSH_PORT || '3083');
 const BASE = 'http://127.0.0.1:' + DSH_PORT;
@@ -1435,6 +1436,359 @@ ipcMain.handle('neuron:pick-folder', async function (e) {
 ipcMain.handle('neuron:scan-folder', async function (e, root) {
   try { return await scanNeuronFolder(root); } catch (err) { return { ok: false, err: String((err && err.message) || err) }; }
 });
+
+// ==================== 个人站场景：真实数据（2026-11-24）====================
+// 三块面板的数据都来自「桌面版 DSH」的本地数据，只读、不要求桌面版正在运行：
+//   · 项目管理  = 控制室里的项目（%USERPROFILE%\.dsh\storages\workspace.json 的工作区），
+//                 按「最后一次对话时间」倒序（= 该工作区各会话日志的最新 mtime）；
+//   · 本地文件  = 已归档项目。判定见 psIsArchived()：目前 = 项目目录已不存在
+//                 （控制室里点「归档项目」只写客户端 localStorage，工作台读不到桌面版那份状态）；
+//   · 最近文件  = 命令页记忆神经元里「📁 文件夹…」打开的那个目录下、最近修改的文件
+//                 （目录由渲染层从 localStorage 的 kneu.lastRoot 取，这里只负责扫盘）。
+// token 数：从会话日志 session.v4.jsonl.zstd 的 assistant usage 累加（net = 输入+输出，
+// 与控制室「消耗」一致；total 含缓存命中，只放在 tooltip 里）。
+const DESKTOP_DSH_HOME = path.join(os.homedir(), '.dsh');
+const PS_LOG_NAME = 'session.v4.jsonl.zstd';
+const psUsageCache = new Map();   // 日志路径|mtime|size -> { net, total, records }
+
+function psReadJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return null; }
+}
+// 一次遍历 sessions 目录，建 sessionId -> 日志路径（workspace.json 里的 sessionIds 用它反查）
+function psSessionLogIndex() {
+  const root = path.join(DESKTOP_DSH_HOME, 'sessions');
+  const out = new Map();
+  let dirs = [];
+  try { dirs = fs.readdirSync(root, { withFileTypes: true }).filter(function (d) { return d.isDirectory(); }); } catch (e) { return out; }
+  for (const d of dirs) {
+    const wsDir = path.join(root, d.name);
+    let subs = [];
+    try { subs = fs.readdirSync(wsDir, { withFileTypes: true }).filter(function (s) { return s.isDirectory(); }); } catch (e) { continue; }
+    for (const s of subs) {
+      const f = path.join(wsDir, s.name, PS_LOG_NAME);
+      try { if (fs.statSync(f).isFile()) out.set(s.name, f); } catch (e) { /* ignore */ }
+    }
+  }
+  return out;
+}
+// 会话日志是「多段 zstd 帧拼接」，一次性解压只能拿到第一帧 ⇒ 按 bytesWritten 逐帧走
+function psReadZstdFrames(buf) {
+  if (!zlib || typeof zlib.zstdDecompressSync !== 'function') return '';
+  let offset = 0, text = '', frames = 0;
+  while (offset < buf.length && frames < 20000) {
+    let part = null;
+    try { part = zlib.zstdDecompressSync(buf.subarray(offset), { info: true }); } catch (e) { break; }
+    text += part.buffer.toString('utf8');
+    const used = part.engine && typeof part.engine.bytesWritten === 'number' ? part.engine.bytesWritten : 0;
+    frames++;
+    if (used <= 0) break;
+    offset += used;
+  }
+  return text;
+}
+function psLogUsage(file) {
+  let st = null;
+  try { st = fs.statSync(file); } catch (e) { return { net: 0, total: 0, records: 0 }; }
+  const key = file + '|' + st.mtimeMs + '|' + st.size;
+  if (psUsageCache.has(key)) return psUsageCache.get(key);
+  let net = 0, total = 0, records = 0;
+  try {
+    const text = psReadZstdFrames(fs.readFileSync(file));
+    for (const line of text.split('\n')) {
+      if (line.indexOf('totalTokens') < 0) continue;
+      let rec = null;
+      try { rec = JSON.parse(line); } catch (e) { continue; }
+      const d = rec && rec.data;
+      const u = (d && d.message && d.message.usage) || (d && d.usage);
+      if (!u) continue;
+      const inTok = Number(u.inputTokens) || 0;
+      const outTok = Number(u.outputTokens) || 0;
+      net += inTok + outTok;
+      total += (typeof u.totalTokens === 'number') ? u.totalTokens : (inTok + outTok);
+      records++;
+    }
+  } catch (e) { /* 单份日志坏了不影响其它项目 */ }
+  const out = { net: net, total: total, records: records };
+  psUsageCache.set(key, out);
+  return out;
+}
+function psProjectsRaw() {
+  const j = psReadJson(path.join(DESKTOP_DSH_HOME, 'storages', 'workspace.json')) || {};
+  const map = (j.tables && j.tables.workspaces) || {};
+  return Object.keys(map).map(function (id) {
+    const w = map[id] || {};
+    return {
+      id: id,
+      title: String(w.title || ''),
+      path: String(w.path || ''),
+      sessionIds: Array.isArray(w.sessionIds) ? w.sessionIds : [],
+      updatedAt: w.updatedAt || ''
+    };
+  });
+}
+function psProjectFacts(w, index) {
+  const logs = w.sessionIds.map(function (id) { return index.get(id); }).filter(Boolean);
+  let last = 0;
+  logs.forEach(function (f) { try { last = Math.max(last, fs.statSync(f).mtimeMs); } catch (e) { /* ignore */ } });
+  // 只在「有会话、但日志 stat 不到」时才退回 workspace.updatedAt；
+  // 0 个会话的项目 updatedAt 只是"打开过工作区"，不代表说过话（排序会误导）。
+  if (!last && logs.length && w.updatedAt) { const t = Date.parse(w.updatedAt); if (!isNaN(t)) last = t; }
+  let exists = false;
+  try { exists = fs.statSync(w.path).isDirectory(); } catch (e) { exists = false; }
+  return { logs: logs, last: last, exists: exists };
+}
+// ★「已归档」的判定入口★
+// 目前 = 项目目录已经不存在（本机正好只有一个：正能量阿陈的工作台 → 旧目录 E:\luanyujia-workbench-main 已删）。
+// 以后要接「控制室里点归档」的状态，只需在这里补一条（注意那份状态在桌面版的浏览器 localStorage 里，
+// 主进程要读得先解 leveldb，成本较高；暂时不做）。
+function psIsArchived(w, facts) { return !facts.exists; }
+
+ipcMain.handle('ps:projects', async function () {
+  const index = psSessionLogIndex();
+  const list = psProjectsRaw().map(function (w) {
+    const facts = psProjectFacts(w, index);
+    return {
+      id: w.id,
+      title: w.title || path.basename(w.path || ''),
+      path: w.path,
+      sessions: facts.logs.length,
+      last: facts.last,
+      archived: psIsArchived(w, facts)
+    };
+  }).filter(function (p) { return !p.archived; });
+  list.sort(function (a, b) { return b.last - a.last; });   // 最近说过话的排最上面
+  return { ok: true, projects: list };
+});
+ipcMain.handle('ps:archived', async function () {
+  const index = psSessionLogIndex();
+  const list = [];
+  psProjectsRaw().forEach(function (w) {
+    const facts = psProjectFacts(w, index);
+    if (!psIsArchived(w, facts)) return;
+    let net = 0, total = 0, records = 0;
+    facts.logs.forEach(function (f) {
+      const u = psLogUsage(f);
+      net += u.net; total += u.total; records += u.records;
+    });
+    list.push({
+      id: w.id,
+      title: w.title || path.basename(w.path || ''),
+      path: w.path,
+      dir: path.basename(w.path || ''),
+      sessions: facts.logs.length,
+      last: facts.last,
+      tokens: net,
+      tokensTotal: total,
+      records: records
+    });
+  });
+  list.sort(function (a, b) { return b.last - a.last; });
+  return { ok: true, projects: list };
+});
+ipcMain.handle('ps:recent-files', async function (e, root, limit) {
+  const cap = Math.max(1, Math.min(20, Number(limit) || 7));
+  const base = String(root || '');
+  try { if (!base || !fs.statSync(base).isDirectory()) return { ok: false, err: '目录不存在', root: base, files: [] }; }
+  catch (err) { return { ok: false, err: '目录不存在', root: base, files: [] }; }
+  // 跳过依赖/构建目录 + 工作台自己的运行时目录（data/captures/_tools/引擎数据）：
+  // 否则「最近修改文件」会被 server.log / start-guard.json 这类每秒都变的文件占满。
+  const skip = new Set(['node_modules', '.git', '.svn', '.hg', 'dist', 'build', 'out', 'coverage', '.next',
+    '.nuxt', '.cache', '__pycache__', '.venv', 'venv', '.idea', '.vscode', 'engine-data', 'electron-profile',
+    'data', 'captures', '_tools', '引擎数据']);
+  const out = [];
+  let entries = 0;
+  (function walk(dir, depth) {
+    if (depth > 4 || entries > 5000) return;
+    let items = [];
+    try { items = fs.readdirSync(dir, { withFileTypes: true }); } catch (err) { return; }
+    for (const it of items) {
+      if (entries++ > 5000) return;
+      if (it.name.charAt(0) === '.' && it.name !== '.gitignore') continue;
+      const full = path.join(dir, it.name);
+      if (it.isDirectory()) {
+        if (skip.has(it.name.toLowerCase())) continue;
+        walk(full, depth + 1);
+        continue;
+      }
+      if (!it.isFile()) continue;
+      // 日志文件通常是被动写入的运行时产物，不算"改过的文件"
+      if (/\.log(\.\d+|\.prev)?$/i.test(it.name)) continue;
+      let st = null;
+      try { st = fs.statSync(full); } catch (err) { continue; }
+      out.push({ name: it.name, rel: path.relative(base, full).replace(/\\/g, '/'), size: st.size, mtime: st.mtimeMs });
+    }
+  })(base, 0);
+  out.sort(function (a, b) { return b.mtime - a.mtime; });
+  return { ok: true, root: base, total: out.length, files: out.slice(0, cap) };
+});
+
+// ---- 个人站 · 首页概览：过去 7 天的 token / 交付 / API 请求 + 吃 Token 大户 ----
+// 和控制室「看板」同一个数据源（会话日志 session.v4.jsonl.zstd）：
+//   token  = 每条 assistant usage 的 input+output（net，与控制室一致）
+//   请求   = 带 usage 的记录条数（= 一次模型 API 调用）
+//   交付   = turn/end 且 reason.kind = completed 的轮次（一次"干完并交付"算 1）
+// 只统计「日志 mtime 在窗口内」的文件（更早的文件不可能有新记录），并按键 cache。
+const psDailyCache = new Map();   // 日志路径|mtime|size -> { days: { 'YYYY-MM-DD': {net,total,req,tasks} } }
+function psLocalDay(ms) {
+  const d = new Date(ms);
+  const p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+function psScanLogDaily(file) {
+  let st = null;
+  try { st = fs.statSync(file); } catch (e) { return null; }
+  const key = file + '|' + st.mtimeMs + '|' + st.size;
+  if (psDailyCache.has(key)) return psDailyCache.get(key);
+  let text = '';
+  try { text = psReadZstdFrames(fs.readFileSync(file)); } catch (e) { text = ''; }
+  const days = {};
+  const rowOf = function (k) { return days[k] || (days[k] = { net: 0, total: 0, req: 0, tasks: 0 }); };
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    if (line.indexOf('"turn/end"') >= 0 && line.indexOf('"completed"') >= 0) {
+      let t = 0;
+      try { t = Number(JSON.parse(line).time) || 0; } catch (e) { t = 0; }
+      if (t) rowOf(psLocalDay(t)).tasks += 1;
+      continue;
+    }
+    if (line.indexOf('totalTokens') < 0) continue;
+    let rec = null;
+    try { rec = JSON.parse(line); } catch (e) { continue; }
+    const d = rec && rec.data;
+    const u = (d && d.message && d.message.usage) || (d && d.usage);
+    if (!u) continue;
+    const t = Number(rec.time) || 0;
+    if (!t) continue;
+    const row = rowOf(psLocalDay(t));
+    const inTok = Number(u.inputTokens) || 0;
+    const outTok = Number(u.outputTokens) || 0;
+    row.net += inTok + outTok;
+    row.total += (typeof u.totalTokens === 'number') ? u.totalTokens : (inTok + outTok);
+    row.req += 1;
+  }
+  const out = { days: days };
+  psDailyCache.set(key, out);
+  return out;
+}
+ipcMain.handle('ps:home', async function () {
+  const WD = ['日', '一', '二', '三', '四', '五', '六'];
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - 6);
+  const sinceMs = start.getTime();
+  const index = psSessionLogIndex();
+  const wsBySession = new Map();
+  const archivedTitles = new Set();
+  psProjectsRaw().forEach(function (w) {
+    const title = w.title || path.basename(w.path || '');
+    w.sessionIds.forEach(function (id) { wsBySession.set(id, title); });
+    let exists = false;
+    try { exists = fs.statSync(w.path).isDirectory(); } catch (e) { exists = false; }
+    if (!exists) archivedTitles.add(title);   // 已归档（目录已删）的项目不参与「吃 Token 大户」
+  });
+  const keys = [];
+  for (let i = 0; i < 7; i++) keys.push(psLocalDay(sinceMs + i * 86400000));
+  const dayMap = {};
+  keys.forEach(function (k) { dayMap[k] = { day: k, tokens: 0, requests: 0, tasks: 0 }; });
+  const wsTokens = new Map();
+  let scanned = 0;
+  for (const pair of index) {
+    const sid = pair[0];
+    const file = pair[1];
+    let st = null;
+    try { st = fs.statSync(file); } catch (e) { continue; }
+    // 文件 mtime 早于窗口 → 里面不可能有窗口内的新记录
+    if (st.mtimeMs < sinceMs - 3600 * 1000) continue;
+    const parsed = psScanLogDaily(file);
+    if (!parsed) continue;
+    scanned++;
+    const title = wsBySession.get(sid) || '';
+    for (const k of Object.keys(parsed.days)) {
+      if (!dayMap[k]) continue;
+      const row = parsed.days[k];
+      dayMap[k].tokens += row.net;
+      dayMap[k].requests += row.req;
+      dayMap[k].tasks += row.tasks;
+      if (title && !archivedTitles.has(title)) wsTokens.set(title, (wsTokens.get(title) || 0) + row.net);
+    }
+  }
+  const days = keys.map(function (k) {
+    const d = new Date(k.slice(0, 4) + '-' + k.slice(5, 7) + '-' + k.slice(8, 10) + 'T00:00:00');
+    return {
+      day: k,
+      date: k.slice(5),
+      weekday: WD[d.getDay()],
+      label: WD[d.getDay()],
+      tokens: dayMap[k].tokens,
+      requests: dayMap[k].requests,
+      tasks: dayMap[k].tasks
+    };
+  });
+  let top = null;
+  wsTokens.forEach(function (v, k) { if (!top || v > top.tokens) top = { title: k, tokens: v }; });
+  const totals = {
+    tokens: days.reduce(function (a, b) { return a + b.tokens; }, 0),
+    requests: days.reduce(function (a, b) { return a + b.requests; }, 0),
+    tasks: days.reduce(function (a, b) { return a + b.tasks; }, 0)
+  };
+  return { ok: true, since: sinceMs, days: days, totals: totals, topWorkspace: top, scanned: scanned };
+});
+
+// ---- 个人站 · 账户余额（充值钱包 / 赠送钱包）----
+// 不再依赖 DEEPSEEK_API_KEY：直接调工作台引擎自己的 RPC `account/getBalance`（DSH 账号服务），
+// 用引擎的浏览器会话密钥签一枚 Cookie，和 webview 里登录的是同一个账号（来源：.credentials.yaml）。
+function readEngineSecret() {
+  try {
+    const yaml = fs.readFileSync(path.join(DSH_DATA_DIR, '.credentials.yaml'), 'utf8');
+    const m = yaml.match(/client-connection\/browser-session:[\s\S]*?secret:\s*([A-Za-z0-9_-]+)/);
+    return m ? m[1] : '';
+  } catch (e) { return ''; }
+}
+async function engineBalance() {
+  const port = Number(DSH_PORT) || 3080;
+  const secret = readEngineSecret();
+  if (!secret) return { ok: false, err: '读不到引擎会话密钥（引擎数据\\.dsh\\.credentials.yaml）' };
+  const c = mintDesktopCookie(port, secret);
+  const client = {
+    version: '1.0.0',
+    locale: 'zh-CN',
+    timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60
+  };
+  const body = JSON.stringify({
+    type: 'client-request', rpcId: 'ps-balance-' + Date.now(),
+    method: 'account/getBalance', payload: { args: { client: client } }
+  });
+  try {
+    const ctl = new AbortController();
+    const to = setTimeout(function () { try { ctl.abort(); } catch (e) { /* ignore */ } }, 12000);
+    const res = await fetch('http://127.0.0.1:' + port + '/api/account/getBalance', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: c.name + '=' + c.value },
+      body: body, signal: ctl.signal
+    });
+    clearTimeout(to);
+    const j = await res.json();
+    const r = j && j.result;
+    if (!r || !r.ok) return { ok: false, err: (r && r.error && r.error.message) || ('HTTP ' + res.status) };
+    const v = r.value;
+    if (!v || v.status !== 'ready') return { ok: false, err: '账号未登录或余额不可用' };
+    const pick = function (list) {
+      const arr = Array.isArray(list) ? list : [];
+      return arr.find(function (x) { return x && x.currency === 'CNY'; }) || arr[0] || null;
+    };
+    const main = pick(v.value);
+    const bonus = pick(v.bonusWallets);
+    return {
+      ok: true,
+      currency: (main && main.currency) || 'CNY',
+      toppedUp: main ? Number(main.balance) || 0 : 0,
+      bonus: bonus ? Number(bonus.balance) || 0 : 0
+    };
+  } catch (e) {
+    return { ok: false, err: (e && e.message) || String(e) };
+  }
+}
+ipcMain.handle('ps:balance', async function () { return engineBalance(); });
 
 
 // ============================================================================

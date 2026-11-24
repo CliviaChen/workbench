@@ -61,4 +61,5 @@ _tmp/
 # 运行时产物
 12-源码照搬/外壳/captures/
 12-源码照搬/外壳/server.log
+12-源码照搬/外壳/server.log.prev
 12-源码照搬/外壳/node_modules/
