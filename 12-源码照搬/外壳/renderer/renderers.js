@@ -18139,6 +18139,115 @@ renderers.neuron = (body, meta, head) => {
   body.appendChild(hud);
   body.appendChild(detail);
   body.appendChild(legend);
+
+  // ---- AI 编辑可视化卡片（画布左侧、详情卡上方；AI 改文件时自动出现）----
+  const editCard = el('div', 'kneu-editcard');
+  editCard.style.display = 'none';
+  const ecHead = el('div', 'knec-head');
+  const ecTitle = el('span', 'knec-title', 'AI 编辑');
+  const ecSum = el('span', 'knec-sum', '');
+  const ecFold = el('button', 'knec-fold', '▾');
+  ecFold.type = 'button';
+  ecFold.title = '收起 / 展开';
+  ecHead.appendChild(ecTitle);
+  ecHead.appendChild(ecSum);
+  ecHead.appendChild(ecFold);
+  const ecList = el('div', 'knec-list');
+  editCard.appendChild(ecHead);
+  editCard.appendChild(ecList);
+  body.appendChild(editCard);
+  let ecCollapsed = false;
+  const ecLive = new Map();
+
+  function editShortPath(p) {
+    var s = String(p || '').replace(/\\/g, '/');
+    var parts = s.split('/');
+    return parts.length > 2 ? ('…/' + parts.slice(-2).join('/')) : s;
+  }
+  function syncEditCardBox() {
+    if (editCard.style.display === 'none') return;
+    var br = body.getBoundingClientRect();
+    var left = 12;
+    var limit = left + 340;
+    try {
+      if (mode === 'folder' && folderBar.style.display !== 'none') {
+        var fr = folderBar.getBoundingClientRect();
+        limit = Math.max(left + 220, fr.right - br.left);
+      }
+    } catch (e) { /* ignore */ }
+    editCard.style.width = Math.max(240, Math.min(380, limit - 12)) + 'px';
+    var d = 0;
+    try { if (detail.classList.contains('on')) d = detail.offsetHeight + 10; } catch (e) { /* ignore */ }
+    editCard.style.bottom = (12 + d) + 'px';
+  }
+  function renderEditCard(title, files) {
+    ecTitle.textContent = title;
+    var add = 0, del = 0;
+    files.forEach(function (f) { add += f.added || 0; del += f.removed || 0; });
+    ecSum.textContent = '+' + add + '  −' + del;
+    ecList.innerHTML = '';
+    files.forEach(function (f) {
+      var row = el('div', 'knec-row');
+      row.appendChild(el('span', 'knec-ico', '</>'));
+      var mid = el('div', 'knec-mid');
+      mid.appendChild(el('div', 'knec-name', String(f.path || '').split(/[\\/]/).pop()));
+      mid.appendChild(el('div', 'knec-dir', editShortPath(f.path)));
+      row.appendChild(mid);
+      row.appendChild(el('span', 'knec-add', '+' + (f.added || 0)));
+      row.appendChild(el('span', 'knec-del', '−' + (f.removed || 0)));
+      var b = el('button', 'knec-reveal', '🗂');
+      b.type = 'button';
+      b.title = '在资源管理器中显示';
+      b.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        try { if (window.app && window.app.app && window.app.app.revealPath) window.app.app.revealPath(f.path); } catch (e) { /* ignore */ }
+      });
+      row.appendChild(b);
+      ecList.appendChild(row);
+    });
+    editCard.style.display = 'flex';
+    editCard.classList.toggle('collapsed', ecCollapsed);
+    ecFold.textContent = ecCollapsed ? '▴' : '▾';
+    syncEditCardBox();
+  }
+  function flashAiPath(p) {
+    var target = String(p || '').replace(/\//g, '\\').toLowerCase();
+    if (!target) return;
+    nodes.forEach(function (n) {
+      if (n.path && String(n.path).replace(/\//g, '\\').toLowerCase() === target) {
+        n.flashUntil = Date.now() + 2600;
+      }
+    });
+  }
+  function handleAiEdit(p) {
+    if (!p || !p.path) return;
+    flashAiPath(p.path);
+    var key = String(p.path).toLowerCase();
+    var cur = ecLive.get(key) || { path: p.path, added: 0, removed: 0 };
+    cur.added += p.added || 0;
+    cur.removed += p.removed || 0;
+    ecLive.set(key, cur);
+    var arr = Array.from(ecLive.values());
+    renderEditCard('AI 正在修改 · ' + arr.length + ' 个文件', arr);
+  }
+  function handleAiDone(p) {
+    var files = (p && p.files) || [];
+    ecLive.clear();
+    if (!files.length) return;
+    renderEditCard('已编辑 ' + files.length + ' 个文件', files);
+  }
+  ecFold.addEventListener('click', function () {
+    ecCollapsed = !ecCollapsed;
+    editCard.classList.toggle('collapsed', ecCollapsed);
+    ecFold.textContent = ecCollapsed ? '▴' : '▾';
+    syncEditCardBox();
+  });
+  var offAiEdit = null, offAiDone = null;
+  try {
+    if (window.app && window.app.onAiEdit) offAiEdit = window.app.onAiEdit(handleAiEdit);
+    if (window.app && window.app.onAiEditDone) offAiDone = window.app.onAiEditDone(handleAiDone);
+  } catch (e) { /* ignore */ }
+
   var headNote = null;
   if (head) {
     headNote = el('span', 'stat-refresh', '共享记忆 · 只读');
@@ -18911,6 +19020,7 @@ renderers.neuron = (body, meta, head) => {
     segs.forEach(function (s) {
       var hot = hoverN && (s.e.a === hoverN.id || s.e.b === hoverN.id);
       var active = selN && (s.e.a === selN.id || s.e.b === selN.id);
+      var flashE = (s.a.flashUntil && s.a.flashUntil > Date.now()) || (s.b.flashUntil && s.b.flashUntil > Date.now());
       // 入场：这条线什么时候开始长（按边中点离中心远近，像冲击波扫过去），长 520ms，从 a 端推向 b 端
       var gp = 1;
       if (introOn) {
@@ -18932,6 +19042,7 @@ renderers.neuron = (body, meta, head) => {
         : (s.e.kind === 'tree') ? (isLightTheme() ? '120,112,100' : '150,143,132')
         : (isLightTheme() ? '20,20,19' : '247,242,231');
       var core = hot ? 1.7 : (s.e.kind === 'dep' ? 1.15 : (s.e.kind === 'tree' ? 0.5 : (s.e.kind === 'ref' ? 0.9 : 0.85)));
+      if (flashE) { lc = '255,46,154'; alpha = 0.55 + 0.4 * Math.abs(Math.sin(tt * 6)); core = 2.2; }
       var ex2 = s.pb.x, ey2 = s.pb.y;
       if (gp < 1) { ex2 = s.pa.x + (s.pb.x - s.pa.x) * gp; ey2 = s.pa.y + (s.pb.y - s.pa.y) * gp; }
       ctx.beginPath();
@@ -19064,6 +19175,8 @@ renderers.neuron = (body, meta, head) => {
       var alpha = dimmed(n) ? 0.18 : Math.max(0.35, 1 - p.z / 1500);
       if (introOn) alpha *= 0.25 + 0.75 * np2;
       var c = col(n.group);
+      var flashN = !!(n.flashUntil && n.flashUntil > Date.now());
+      if (flashN) c = '#ff2e9a';
       if (n.kind === 'project') { if (n.status === 'delivery') c = '#f0a35e'; else if (n.status === 'archived' || n.status === 'parked') c = '#8b93a7'; }
       // 孟菲斯节点：实心圆 + 2px ink 描边（光晕 / 球面渐变 / 高光全部去掉）
       ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
@@ -19072,6 +19185,15 @@ renderers.neuron = (body, meta, head) => {
       ctx.lineWidth = 2;
       ctx.strokeStyle = 'rgba(7,6,10,.9)';
       ctx.stroke();
+      if (flashN) {
+        // AI 正在改这个文件：洋红脉冲外圈
+        var phf = (Math.sin(tt * 7) + 1) / 2;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r + 4 + 4 * phf, 0, Math.PI * 2);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(255,46,154,' + (0.35 + 0.5 * phf) + ')';
+        ctx.stroke();
+      }
       if (nring > 0) {                             // 点亮瞬间：一圈光环扩散出去
         ctx.beginPath();
         ctx.arc(p.x, p.y, r + 4 + 26 * (1 - nring), 0, 6.2832);
@@ -19264,7 +19386,7 @@ renderers.neuron = (body, meta, head) => {
   }
 
   function showDetail(n) {
-    if (!n) { detail.classList.remove('on'); return; }
+    if (!n) { detail.classList.remove('on'); try { syncEditCardBox(); } catch (e) { /* ignore */ } return; }
     detail.innerHTML = '';
     var t = el('div', 'kneu-dt', n.label + (n.title ? (' · ' + n.title) : ''));
     detail.appendChild(t);
@@ -19326,6 +19448,7 @@ renderers.neuron = (body, meta, head) => {
     row.appendChild(bOpen); row.appendChild(bReveal); row.appendChild(bCopy);
     detail.appendChild(row);
     detail.classList.add('on');
+    try { syncEditCardBox(); } catch (e) { /* ignore */ }
   }
 
   bRot.addEventListener('click', function () {
@@ -19420,6 +19543,8 @@ renderers.neuron = (body, meta, head) => {
   return function cleanup() {
     disposed = true;
     if (raf) cancelAnimationFrame(raf);
+    try { if (offAiEdit) offAiEdit(); } catch (e) { /* ignore */ }
+    try { if (offAiDone) offAiDone(); } catch (e) { /* ignore */ }
     if (ro) { try { ro.disconnect(); } catch (e) { /* ignore */ } }
     cv.removeEventListener('pointerdown', onDown);
     cv.removeEventListener('pointermove', onMove);

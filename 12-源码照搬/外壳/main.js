@@ -105,6 +105,150 @@ function broadcast(channel, payload) {
     try { w.webContents.send(channel, payload); } catch (e) { /* ignore */ }
   }
 }
+
+// ===== AI 编辑可视化（2026-11-24）==========================================
+// 监听"AI 正在干活的工作区"里的文本文件变化，算出 +行/-行，广播给渲染层：
+//   'ai-edit:file' { path, added, removed, ts }  —— 实时（用于神经元闪烁）
+//   'ai-edit:done' { files: [...], ts }          —— 一段连续修改结束（2.2s 无新变化）
+// 只读；跳过 node_modules/.git/运行时数据/二进制；启动时先做一次基线快照，之后按内容差算行数。
+const EDIT_TEXT_EXT = new Set(['.md', '.txt', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.vue', '.svelte',
+  '.py', '.ps1', '.sh', '.bat', '.cmd', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.css', '.scss', '.less',
+  '.html', '.htm', '.json', '.yaml', '.yml', '.toml', '.ini', '.csv', '.xml', '.gitignore']);
+const EDIT_SKIP_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', 'dist', 'build', 'out', 'coverage', '.next',
+  '.nuxt', '.cache', '__pycache__', '.venv', 'venv', '.idea', '.vscode', '引擎数据', 'captures', 'electron-profile',
+  'logs', '备份', '配图', '图片参考', '图片素材']);
+let editWatchersStarted = false;
+const editCache = new Map();      // abs -> 上次内容
+const editPending = new Map();    // abs -> { path, added, removed, ts }
+const editTimers = new Map();     // abs -> debounce timer
+let editDoneTimer = null;
+
+function editRootDirs() {
+  const roots = new Set();
+  try { roots.add(path.resolve(__dirname, '..', '..')); } catch (e) { /* ignore */ }
+  try {
+    const wf = path.join(os.homedir(), '.dsh', 'storages', 'workspace.json');
+    const j = JSON.parse(fs.readFileSync(wf, 'utf8'));
+    const tbl = (j && j.tables && j.tables.workspaces) || {};
+    Object.keys(tbl).forEach(function (k) {
+      const w = tbl[k];
+      if (w && w.path) roots.add(path.resolve(String(w.path)));
+    });
+  } catch (e) { /* ignore */ }
+  return Array.from(roots).filter(function (p) {
+    try { return fs.statSync(p).isDirectory(); } catch (e) { return false; }
+  });
+}
+function editSkipPath(p) {
+  const parts = String(p).toLowerCase().split(/[\\/]+/);
+  if (parts.some(function (x) { return EDIT_SKIP_DIRS.has(x); })) return true;
+  if (/\.(png|jpe?g|gif|webp|ico|bmp|mp4|mp3|wav|pdf|zip|7z|gz|asar|exe|dll|woff2?|ttf|psd|lock)$/i.test(p)) return true;
+  return false;
+}
+function editIsText(p) {
+  if (/[\\/]\.gitignore$/i.test(p)) return true;
+  return EDIT_TEXT_EXT.has(path.extname(p).toLowerCase());
+}
+function editLineStats(a, b) {
+  const A = String(a == null ? '' : a).split(/\r?\n/);
+  const B = String(b == null ? '' : b).split(/\r?\n/);
+  if (A.length === 1 && A[0] === '') A.length = 0;
+  if (B.length === 1 && B[0] === '') B.length = 0;
+  const count = function (arr) {
+    const m = new Map();
+    for (const line of arr) m.set(line, (m.get(line) || 0) + 1);
+    return m;
+  };
+  const ma = count(A), mb = count(B);
+  let added = 0, removed = 0;
+  mb.forEach(function (v, k) { added += Math.max(0, v - (ma.get(k) || 0)); });
+  ma.forEach(function (v, k) { removed += Math.max(0, v - (mb.get(k) || 0)); });
+  return { added: added, removed: removed };
+}
+function editScheduleDone() {
+  if (editDoneTimer) clearTimeout(editDoneTimer);
+  editDoneTimer = setTimeout(function () {
+    editDoneTimer = null;
+    if (!editPending.size) return;
+    const files = Array.from(editPending.values());
+    editPending.clear();
+    try { broadcast('ai-edit:done', { files: files, ts: Date.now() }); } catch (e) { /* ignore */ }
+  }, 2200);
+}
+function editCheckFile(abs) {
+  if (editSkipPath(abs) || !editIsText(abs)) return;
+  let st = null;
+  try { st = fs.statSync(abs); } catch (e) { st = null; }
+  if (st && !st.isFile()) return;
+  let next = '';
+  if (st) {
+    if (st.size > 512 * 1024) return;
+    try { next = fs.readFileSync(abs, 'utf8'); } catch (e) { return; }
+  }
+  const prev = editCache.get(abs);
+  if (prev === undefined && st) { editCache.set(abs, next); return; }   // 启动后新出现的文件：先记基线，不报
+  const before = prev === undefined ? '' : prev;
+  if (before === next) return;
+  const diff = editLineStats(before, next);
+  if (!diff.added && !diff.removed) { editCache.set(abs, next); return; }
+  editCache.set(abs, next);
+  const cur = editPending.get(abs) || { path: abs, added: 0, removed: 0, ts: 0 };
+  cur.added += diff.added;
+  cur.removed += diff.removed;
+  cur.ts = Date.now();
+  editPending.set(abs, cur);
+  try { broadcast('ai-edit:file', { path: abs, added: diff.added, removed: diff.removed, ts: cur.ts }); } catch (e) { /* ignore */ }
+  editScheduleDone();
+}
+function editScheduleCheck(abs) {
+  const old = editTimers.get(abs);
+  if (old) clearTimeout(old);
+  editTimers.set(abs, setTimeout(function () {
+    editTimers.delete(abs);
+    editCheckFile(abs);
+  }, 220));
+}
+function editScanBaseline(root) {
+  let budget = 6000;
+  const walk = function (dir, depth) {
+    if (budget <= 0 || depth > 6) return;
+    let ents = [];
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+    for (const ent of ents) {
+      if (budget <= 0) return;
+      const abs = path.join(dir, ent.name);
+      if (editSkipPath(abs)) continue;
+      if (ent.isDirectory()) { walk(abs, depth + 1); continue; }
+      if (!editIsText(abs)) continue;
+      let st = null;
+      try { st = fs.statSync(abs); } catch (e) { continue; }
+      if (!st.isFile() || st.size > 512 * 1024) continue;
+      budget--;
+      try { editCache.set(abs, fs.readFileSync(abs, 'utf8')); } catch (e) { /* ignore */ }
+    }
+  };
+  walk(root, 0);
+}
+function startEditWatch() {
+  if (editWatchersStarted) return;
+  editWatchersStarted = true;
+  const roots = editRootDirs();
+  roots.forEach(function (root) {
+    try { editScanBaseline(root); } catch (e) { /* ignore */ }
+    let w = null;
+    try {
+      w = fs.watch(root, { recursive: true }, function (ev, filename) {
+        if (!filename) return;
+        editScheduleCheck(path.resolve(root, String(filename)));
+      });
+      w.on('error', function () { /* ignore */ });
+      log('[ai-edit] 监听 ' + root);
+    } catch (e) {
+      log('[ai-edit] 监听失败 ' + root + '：' + (e && e.message || e));
+    }
+  });
+}
+ipcMain.handle('ai-edit:roots', function () { try { return editRootDirs(); } catch (e) { return []; } });
 function windowOfEvent(e) {
   try {
     const w = BrowserWindow.fromWebContents(e && e.sender);
@@ -5165,6 +5309,8 @@ if (!gotLock) {
       reportFatal('创建主窗口失败', err);
       try { createWindow({ isMain: true }); } catch (e2) { reportFatal('重试创建主窗口仍失败', e2); }
     }
+    // AI 编辑可视化：监听工作区文件变化（只读；基线扫描 + 变化广播）
+    try { startEditWatch(); } catch (e) { log('[ai-edit] 启动失败：' + (e && e.message || e)); }
     // 恢复上次分离出去的场景窗口（场景 json 可能已被删 → 校验后只开仍然存在的）
     try {
       const known = listScenarios().map(function (s) { return s.id; });

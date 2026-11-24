@@ -52,6 +52,17 @@ contextBridge.exposeInMainWorld('app', {
   // 主进程有没有存过顺序（渲染层据此决定要不要把老版本的 localStorage 顺序迁移过去）
   getSceneOrder: () => ipcRenderer.invoke('scenes:order:get'),
   injectHarnessPanel: (webContentsId, pinTarget) => ipcRenderer.invoke('harness:wv:inject', webContentsId, pinTarget),
+  onAiEdit: (cb) => {
+    const h = (e, p) => { try { cb(p); } catch (err) { /* ignore */ } };
+    ipcRenderer.on('ai-edit:file', h);
+    return () => { try { ipcRenderer.removeListener('ai-edit:file', h); } catch (err) { /* ignore */ } };
+  },
+  onAiEditDone: (cb) => {
+    const h = (e, p) => { try { cb(p); } catch (err) { /* ignore */ } };
+    ipcRenderer.on('ai-edit:done', h);
+    return () => { try { ipcRenderer.removeListener('ai-edit:done', h); } catch (err) { /* ignore */ } };
+  },
+  aiEditRoots: () => ipcRenderer.invoke('ai-edit:roots'),
   // 孟菲斯皮肤：把「主题 + 开关」同步给内嵌的 DSH 界面（main.js 负责注入到所有引擎 webview）
   skin: {
     apply: (theme, on) => ipcRenderer.invoke('skin:apply', theme, on),
