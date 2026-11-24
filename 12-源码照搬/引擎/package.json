@@ -1,0 +1,7 @@
+{
+  "name": "dsh-engine-shim",
+  "private": true,
+  "version": "0.2.2-rc.3",
+  "description": "适配层：把本机已安装的 DeepSeek Harness 桌面版引擎当作工作台的 引擎\\ 使用",
+  "main": "apps/cli/lib/bin.js"
+}

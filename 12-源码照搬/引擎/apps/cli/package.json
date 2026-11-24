@@ -1,0 +1,6 @@
+{
+  "name": "@deepseek-ai/dsh-cli",
+  "private": true,
+  "version": "0.2.2-rc.3",
+  "bin": { "dsh": "lib/bin.js" }
+}
