@@ -1,4 +1,4 @@
-// 工作台 — 渲染层主逻辑（多场景版）
+﻿// 工作台 — 渲染层主逻辑（多场景版）
 // 场景 0：DSH 引擎（默认初始界面，webview 内嵌，带 token）
 // 场景 1..N：本地场景（scenarios/*.json 配置 + renderers 分发）
 // 顶层声明一律用 var：刷新按钮会带时间戳重复加载本文件，const/let 重复声明会直接报错导致热更新失效
@@ -18119,6 +18119,39 @@ renderers.neuron = (body, meta, head) => {
   });
   folderBar.appendChild(bOnlyFolders);
   body.appendChild(folderBar);
+
+  // 路径面包屑（在「文件夹/自转/复位…」按钮行下方；可收起；点段级可回到该文件夹）
+  const pathBar = el('div', 'kneu-pathbar');
+  const pathFold = el('button', 'kneu-pathfold', '▾');
+  pathFold.type = 'button';
+  pathFold.title = '收起 / 展开路径';
+  const pathCompact = el('span', 'kneu-pathcompact', '');
+  const pathList = el('div', 'kneu-pathlist');
+  pathBar.appendChild(pathFold);
+  pathBar.appendChild(pathCompact);
+  pathBar.appendChild(pathList);
+  pathBar.style.display = 'none';
+  body.appendChild(pathBar);
+  let pathCollapsed = false;
+  pathFold.addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    pathCollapsed = !pathCollapsed;
+    pathBar.classList.toggle('collapsed', pathCollapsed);
+    pathFold.textContent = pathCollapsed ? '▸' : '▾';
+  });
+
+  // 画布右键菜单：回到根目录
+  const rootMenu = el('div', 'kneu-rootmenu');
+  const rootBtn = el('button', 'kneu-rootbtn', '← 回到根目录');
+  rootBtn.type = 'button';
+  rootMenu.appendChild(rootBtn);
+  rootMenu.style.display = 'none';
+  body.appendChild(rootMenu);
+  rootBtn.addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    rootMenu.style.display = 'none';
+    if (navRoot) enterFolder(navRoot);
+  });
   const detail = el('div', 'kneu-detail');
   const legend = el('div', 'kneu-legend');
   var LEGEND_MEM = [['engine', '引擎/工具'], ['ui', '界面/设计'], ['code', '代码'], ['content', '内容/业务'], ['ops', '运维/清理'], ['project', '项目'], ['memory', '私有记忆'], ['chain', '提交链'], ['source', '数据源'], ['skill', '技能'], ['doc', '共享文档']];
@@ -18235,6 +18268,8 @@ renderers.neuron = (body, meta, head) => {
     ecLive.clear();
     if (!files.length) return;
     renderEditCard('已编辑 ' + files.length + ' 个文件', files);
+    // 常驻：存起来，切换场景/重启后还能在左下角恢复（直到下一次 AI 编辑替换它）
+    try { localStorage.setItem('kneuEditCard:' + folderPid(), JSON.stringify({ files: files, ts: Date.now() })); } catch (e) { /* ignore */ }
   }
   ecFold.addEventListener('click', function () {
     ecCollapsed = !ecCollapsed;
@@ -18247,6 +18282,16 @@ renderers.neuron = (body, meta, head) => {
     if (window.app && window.app.onAiEdit) offAiEdit = window.app.onAiEdit(handleAiEdit);
     if (window.app && window.app.onAiEditDone) offAiDone = window.app.onAiEditDone(handleAiDone);
   } catch (e) { /* ignore */ }
+  // 跨场景常驻：恢复上次被 AI 改过的文件汇总（直到下一次 AI 编辑把它替换掉）
+  setTimeout(function () {
+    try {
+      var raw = localStorage.getItem('kneuEditCard:' + folderPid());
+      var saved = raw ? JSON.parse(raw) : null;
+      if (saved && saved.files && saved.files.length) {
+        renderEditCard('已编辑 ' + saved.files.length + ' 个文件', saved.files);
+      }
+    } catch (e) { /* ignore */ }
+  }, 700);
 
   var headNote = null;
   if (head) {
@@ -18259,6 +18304,8 @@ renderers.neuron = (body, meta, head) => {
   let edges = [];        // {a,b,kind}
   let mode = 'memory';   // 'memory' = 共享记忆网络；'folder' = 用户选的文件夹
   let folderRoot = '';   // 文件夹模式的根目录
+  let navRoot = '';      // 用户最初选的那个根目录（右键「回到根目录」回这里）
+  let navCenter = '';    // 当前旋转中心（可能是根，也可能是进入的子目录）
   let folderStats = null;
   let folderRaw = null;    // 扫描原始结果（切层级/只看文件夹时从它重建，不重复扫盘）
   let depthLimit = 0;      // 0 = 全部；2/3/4 = 只显示到第 N 层（根 = 0 层）
@@ -18779,6 +18826,7 @@ renderers.neuron = (body, meta, head) => {
         var br = body.getBoundingClientRect();
         var sr = stat.getBoundingClientRect();
         folderBar.style.top = Math.max(46, Math.round(sr.bottom - br.top + 8)) + 'px';
+        try { syncPathBarTop(); } catch (e) { /* ignore */ }
       });
     } catch (e) { /* ignore */ }
   }
@@ -18832,8 +18880,74 @@ renderers.neuron = (body, meta, head) => {
     } catch (e) { /* ignore */ }
   }
 
+  // ---------- 文件夹模式：路径面包屑 / 进入子目录 ----------
+  function pathParts(abs) {
+    var s = String(abs || '').replace(/\//g, '\\').replace(/\\+$/, '');
+    var out = [], acc = '';
+    s.split('\\').forEach(function (name, i) {
+      if (!name) return;
+      acc = i === 0 ? (name + '\\') : (acc.replace(/\\$/, '') + '\\' + name);
+      out.push({ name: name, path: acc });
+    });
+    return out;
+  }
+  function syncPathBarTop() {
+    if (mode !== 'folder' || folderBar.style.display === 'none') { pathBar.style.display = 'none'; return; }
+    pathBar.style.display = 'flex';
+    pathBar.style.top = (folderBar.offsetTop + folderBar.offsetHeight + 6) + 'px';
+  }
+  function updateBreadcrumb() {
+    if (mode !== 'folder' || !folderRoot) { pathBar.style.display = 'none'; return; }
+    syncPathBarTop();
+    // 面包屑只显示「从打开的根目录开始」的相对路径（不带盘符/上级目录）：
+    //   根 = AChen-workbench；下一级 = AChen-workbench\awesome-design-md-main
+    var root = String(navRoot || folderRoot).replace(/\//g, '\\').replace(/\\+$/, '');
+    var cur = String(folderRoot).replace(/\//g, '\\').replace(/\\+$/, '');
+    var rootName = root.split('\\').pop() || root;
+    var segs = [{ name: rootName, path: root }];
+    var rl = root.toLowerCase(), cl = cur.toLowerCase();
+    if (cl.indexOf(rl + '\\') === 0) {
+      var acc = root;
+      cur.slice(root.length).replace(/^\\/, '').split('\\').forEach(function (name) {
+        if (!name) return;
+        acc = acc + '\\' + name;
+        segs.push({ name: name, path: acc });
+      });
+    }
+    pathList.innerHTML = '';
+    segs.forEach(function (seg, i) {
+      if (i) pathList.appendChild(el('span', 'kneu-pathsep', '\\'));
+      var b = el('button', 'kneu-pathseg', seg.name);
+      b.type = 'button';
+      b.title = seg.path;
+      b.addEventListener('click', function (ev) { ev.stopPropagation(); enterFolder(seg.path); });
+      pathList.appendChild(b);
+    });
+    pathCompact.textContent = '📁 ' + (cur.split('\\').pop() || cur);
+    pathBar.classList.toggle('collapsed', pathCollapsed);
+    pathFold.textContent = pathCollapsed ? '▸' : '▾';
+  }
+  function enterFolder(abs) {
+    if (mode !== 'folder' || !abs) return Promise.resolve(false);
+    var norm = String(abs).replace(/\//g, '\\').replace(/\\+$/, '');
+    var cur = String(folderRoot || '').replace(/\//g, '\\').replace(/\\+$/, '');
+    if (norm.toLowerCase() === cur.toLowerCase()) return Promise.resolve(true);
+    return loadFolder(norm, { keepRoot: true }).then(function (ok) {
+      if (ok) { sel = null; hover = null; detail.classList.remove('on'); try { syncEditCardBox(); } catch (e) { /* ignore */ } }
+      return ok;
+    });
+  }
+  function enterNodeDir(n) {
+    if (!n || mode !== 'folder') return;
+    var p = n.path || (n.paths && n.paths[0]) || '';
+    if (!p || n.kind === 'core') return;
+    var target = (n.kind === 'folder' || n.isDir) ? p : p.replace(/[\\/][^\\/]*$/, '');
+    if (target) enterFolder(target);
+  }
+
   // ---------- 文件夹模式：载入 ----------
-  function loadFolder(root) {
+  function loadFolder(root, opts) {
+    opts = opts || {};
     if (!root) return Promise.resolve(false);
     if (!window.app || !window.app.neuron) { stat.textContent = '这个版本没有文件夹通道'; return Promise.resolve(false); }
     stat.textContent = '正在扫描文件夹…';
@@ -18844,6 +18958,8 @@ renderers.neuron = (body, meta, head) => {
       }
       mode = 'folder';
       folderRoot = r.root;
+      navCenter = r.root;
+      if (!opts.keepRoot || !navRoot) navRoot = opts.navRoot || r.root;
       folderRaw = { nodes: r.nodes || [], edges: r.edges || [], stats: r.stats || {} };
       onlyMem = false;
       bMem.classList.remove('on');
@@ -18870,9 +18986,17 @@ renderers.neuron = (body, meta, head) => {
       bOnlyFolders.classList.toggle('on', onlyFolders);
       paintDepthBtns();
       applyFolderView();
-      try { localStorage.setItem('kneuFolder:' + folderPid(), folderRoot); } catch (e) { /* ignore */ }
-      // 联动：让同一场景里的 DSH 对话面板把这个目录也切成它的工作区
-      try { document.dispatchEvent(new CustomEvent('kneu:folder', { detail: { path: folderRoot } })); } catch (e) { /* ignore */ }
+      try {
+        localStorage.setItem('kneuFolder:' + folderPid(), folderRoot);
+        localStorage.setItem('kneuNavRoot:' + folderPid(), navRoot);
+      } catch (e) { /* ignore */ }
+      updateBreadcrumb();
+      try { syncEditCardBox(); } catch (e) { /* ignore */ }
+      // 联动：只有在「用 📁 文件夹… 选了一个新根目录」时才让 DSH 切工作区；
+      // 在神经元里进入子目录（keepRoot）只是查看，绝不能在 DSH 里新建工作区/控制室卡片。
+      if (!opts.keepRoot) {
+        try { document.dispatchEvent(new CustomEvent('kneu:folder', { detail: { path: folderRoot } })); } catch (e) { /* ignore */ }
+      }
       return true;
     }).catch(function (e) {
       stat.textContent = '扫不了这个文件夹：' + ((e && e.message) || e);
@@ -18883,9 +19007,14 @@ renderers.neuron = (body, meta, head) => {
   function backToMemory() {
     mode = 'memory';
     folderRoot = '';
+    navRoot = '';
+    navCenter = '';
     folderStats = null;
     folderRaw = null;
     folderBar.style.display = 'none';
+    pathBar.style.display = 'none';
+    rootMenu.style.display = 'none';
+    try { syncEditCardBox(); } catch (e) { /* ignore */ }
     bMem.style.display = '';
     bBack.style.display = 'none';
     bFolder.classList.remove('on');
@@ -18895,6 +19024,7 @@ renderers.neuron = (body, meta, head) => {
     search.placeholder = '搜场景 / 技能 / 文件…';
     if (headNote) headNote.textContent = '共享记忆 · 只读';
     try { localStorage.removeItem('kneuFolder:' + folderPid()); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem('kneuNavRoot:' + folderPid()); } catch (e) { /* ignore */ }
     // 联动：告诉 DSH 面板退出「文件夹工作区」模式，恢复原来的会话钉住
     try { document.dispatchEvent(new CustomEvent('kneu:memory')); } catch (e) { /* ignore */ }
     return load();
@@ -18923,6 +19053,7 @@ renderers.neuron = (body, meta, head) => {
       fit._lastW = W; fit._lastH = H;
       layoutFolder();
     }
+    try { syncEditCardBox(); } catch (e) { /* ignore */ }
   }
   function project(n) {
     var cy = Math.cos(ry), sy = Math.sin(ry);
@@ -19330,6 +19461,7 @@ renderers.neuron = (body, meta, head) => {
     return best;
   }
   function onDown(ev) {
+    hideRootMenu();
     drag = { x: ev.clientX, y: ev.clientY, ry: ry, rx: rx, moved: false };
     cv.setPointerCapture && cv.setPointerCapture(ev.pointerId);
   }
@@ -19352,9 +19484,23 @@ renderers.neuron = (body, meta, head) => {
     if (wasDrag) return;
     var p = pos(ev);
     var n = pick(p.x, p.y);
+    var again = !!(n && sel === n.id && mode === 'folder');
     sel = n ? n.id : null;
+    if (again) { enterNodeDir(n); return; }
     showDetail(n);
   }
+  function onCanvasContext(ev) {
+    if (mode !== 'folder') return;
+    ev.preventDefault();
+    var br = body.getBoundingClientRect();
+    rootMenu.style.left = Math.max(6, ev.clientX - br.left) + 'px';
+    rootMenu.style.top = Math.max(6, ev.clientY - br.top) + 'px';
+    var atRoot = !!(navRoot && folderRoot && String(folderRoot).toLowerCase() === String(navRoot).toLowerCase());
+    rootBtn.disabled = atRoot;
+    rootBtn.textContent = atRoot ? '已在根目录' : ('← 回到根目录 · ' + (String(navRoot).split(/[\\/]/).pop() || ''));
+    rootMenu.style.display = 'flex';
+  }
+  function hideRootMenu() { rootMenu.style.display = 'none'; }
   function onWheel(ev) {
     ev.preventDefault();
     zoom = Math.max(0.35, Math.min(9, zoom * (ev.deltaY > 0 ? 0.92 : 1.08)));
@@ -19506,6 +19652,8 @@ renderers.neuron = (body, meta, head) => {
   cv.addEventListener('pointerup', onUp);
   cv.addEventListener('pointerleave', function () { hover = null; });
   cv.addEventListener('wheel', onWheel, { passive: false });
+  cv.addEventListener('contextmenu', onCanvasContext);
+  document.addEventListener('click', hideRootMenu);
   bRot.classList.toggle('on', auto);
 
   var ro = null;
@@ -19527,15 +19675,29 @@ renderers.neuron = (body, meta, head) => {
   })();
   // 恢复上次打开的文件夹（没有就照旧显示记忆网络）
   var savedFolder = '';
-  try { savedFolder = localStorage.getItem('kneuFolder:' + ((meta && meta.id) || 'ai')) || ''; } catch (e) { /* ignore */ }
-  load().then(function () { if (savedFolder) return loadFolder(savedFolder); });
+  var savedNavRoot = '';
+  try {
+    savedFolder = localStorage.getItem('kneuFolder:' + ((meta && meta.id) || 'ai')) || '';
+    savedNavRoot = localStorage.getItem('kneuNavRoot:' + ((meta && meta.id) || 'ai')) || '';
+  } catch (e) { /* ignore */ }
+  load().then(function () {
+    if (savedFolder) return loadFolder(savedFolder, { keepRoot: true, navRoot: savedNavRoot || savedFolder });
+  });
   // 调试/自动化钩子：按路径直接切到文件夹模式（面板上正常用「📁 文件夹…」）
   body.__kneuLoadFolder = loadFolder;
   body.__kneuDebug = function () {
     var s = nodes[1] || {};
     var nulls = nodes.filter(function (n) { return n.x == null; }).length;
     var trees = edges.filter(function (e) { return e.kind === 'tree'; }).length;
-    return { zoom: zoom, W: W, H: H, n: nodes.length, nulls: nulls, treeEdges: trees, mode: mode, depthLimit: depthLimit, onlyFolders: onlyFolders, ids: nodes.slice(0, 5).map(function (n) { return n.id + ':' + n.depth + ':' + n.kind + ':' + n.x; }) };
+    return {
+      zoom: zoom, W: W, H: H, n: nodes.length, nulls: nulls, treeEdges: trees, mode: mode,
+      depthLimit: depthLimit, onlyFolders: onlyFolders, navRoot: navRoot, navCenter: navCenter,
+      ids: nodes.slice(0, 5).map(function (n) { return n.id + ':' + n.depth + ':' + n.kind + ':' + n.x; }),
+      pts: nodes.slice(0, 30).map(function (n) {
+        var pp = project(n);
+        return { id: n.id, label: n.label, x: Math.round(pp.x), y: Math.round(pp.y) };
+      })
+    };
   };
   raf = requestAnimationFrame(loop);
 
@@ -19550,7 +19712,10 @@ renderers.neuron = (body, meta, head) => {
     cv.removeEventListener('pointermove', onMove);
     cv.removeEventListener('pointerup', onUp);
     cv.removeEventListener('wheel', onWheel);
+    cv.removeEventListener('contextmenu', onCanvasContext);
+    document.removeEventListener('click', hideRootMenu);
     body.innerHTML = '';
   };
 };
+
 

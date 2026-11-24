@@ -5186,3 +5186,18 @@ html[data-theme="light-legacy"] .sb-reload { background: #fff; }
 .knec-del { flex: 0 0 auto; font-size: 11px; color: #ff8a9a; }
 .knec-reveal { width: 22px; height: 22px; flex: 0 0 auto; padding: 0; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; font-size: 11px; line-height: 1; }
 .kneu-editcard.collapsed .knec-list { display: none; }
+
+/* 记忆神经元 · 路径面包屑 / 右键根目录（皮肤关闭兜底） */
+.kneu-pathbar { position: absolute; left: 12px; z-index: 4; display: none; align-items: center; gap: 4px; max-width: calc(100% - 24px); }
+.kneu-pathfold { width: 18px; height: 18px; padding: 0; border: 1px solid var(--border); background: rgba(12,18,30,.9); color: var(--text); cursor: pointer; line-height: 1; }
+.kneu-pathlist { display: flex; align-items: center; gap: 1px; flex-wrap: wrap; max-width: 100%; padding: 3px 6px; background: rgba(12,18,30,.9); border: 1px solid var(--border); border-radius: 6px; }
+.kneu-pathseg { padding: 1px 3px; border: none; background: transparent; color: var(--text); font-size: 10.5px; cursor: pointer; white-space: nowrap; }
+.kneu-pathseg:hover { color: #7fd0ff; }
+.kneu-pathseg.dim { opacity: .45; cursor: default; }
+.kneu-pathsep { color: var(--text-dim); font-size: 10px; }
+.kneu-pathcompact { display: none; padding: 3px 8px; background: rgba(12,18,30,.9); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 10.5px; white-space: nowrap; }
+.kneu-pathbar.collapsed .kneu-pathlist { display: none; }
+.kneu-pathbar.collapsed .kneu-pathcompact { display: inline-block; }
+.kneu-rootmenu { position: absolute; z-index: 9; display: none; }
+.kneu-rootbtn { padding: 5px 10px; background: rgba(12,18,30,.95); color: var(--text); border: 1px solid var(--border); border-radius: 6px; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.kneu-rootbtn:disabled { opacity: .45; cursor: default; }

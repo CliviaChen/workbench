@@ -142,6 +142,8 @@ function editRootDirs() {
 function editSkipPath(p) {
   const parts = String(p).toLowerCase().split(/[\\/]+/);
   if (parts.some(function (x) { return EDIT_SKIP_DIRS.has(x); })) return true;
+  // 工作台自己的运行时目录（start-guard.json 之类每启动都变，别当 AI 编辑）
+  if (/[\\/]_tools[\\/]|[\\/]外壳[\\/]data[\\/]/i.test(String(p))) return true;
   if (/\.(png|jpe?g|gif|webp|ico|bmp|mp4|mp3|wav|pdf|zip|7z|gz|asar|exe|dll|woff2?|ttf|psd|lock)$/i.test(p)) return true;
   return false;
 }
