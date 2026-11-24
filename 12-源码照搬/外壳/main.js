@@ -922,6 +922,139 @@ ipcMain.handle('harness:url', () => {
 });
 ipcMain.handle('harness:ready', () => engineIsForeign || !!harnessToken);
 
+// ---- 命令页直连桌面版 DSH（2026-11-24）--------------------------------------
+// 桌面版 DSH（D:\DSH\DeepSeek Harness.exe）自带一个只监听 127.0.0.1 的 Web 服务，
+// 用「进程级随机 launch token + 签名 Cookie」鉴权。launch token 不落盘，但签名密钥
+// （client-connection/browser-session）明文存在 %USERPROFILE%\.dsh\.credentials.yaml，
+// 所以这里按它自己的算法，为「当前桌面端端口」签一枚 v1 会话 Cookie，灌进目标 webview
+// 的会话分区 ⇒ 那个面板就成了桌面版 DSH 的第二个窗口：工作区/对话同源、实时双向。
+// 只对场景 json 里写了 harnessSource:'desktop' 的面板生效，其它面板仍连工作台引擎。
+function b64url(buf) {
+  return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function readDesktopSecret() {
+  try {
+    const yaml = fs.readFileSync(path.join(os.homedir(), '.dsh', '.credentials.yaml'), 'utf8');
+    const m = yaml.match(/client-connection\/browser-session:[\s\S]*?secret:\s*([A-Za-z0-9_-]+)/);
+    return m ? m[1] : '';
+  } catch (e) { return ''; }
+}
+function desktopPids() {
+  const pids = new Set();
+  try {
+    const out = spawnSync('tasklist', ['/FO', 'CSV', '/NH', '/FI', 'IMAGENAME eq DeepSeek Harness.exe'], { encoding: 'utf8', windowsHide: true });
+    String(out.stdout || '').split(/\r?\n/).forEach(function (line) {
+      const m = line.match(/"DeepSeek Harness\.exe","(\d+)"/);
+      if (m) pids.add(m[1]);
+    });
+  } catch (e) { /* ignore */ }
+  return pids;
+}
+function desktopPorts() {
+  const pids = desktopPids();
+  if (!pids.size) return [];
+  const ports = [];
+  try {
+    const out = spawnSync('netstat', ['-ano'], { encoding: 'utf8', windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+    String(out.stdout || '').split(/\r?\n/).forEach(function (line) {
+      const m = line.match(/^\s*TCP\s+127\.0\.0\.1:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/);
+      if (m && pids.has(m[2])) ports.push(Number(m[1]));
+    });
+  } catch (e) { /* ignore */ }
+  return ports;
+}
+function probeDshWeb(port) {
+  return new Promise(function (resolve) {
+    const req = http.request({ host: '127.0.0.1', port: port, path: '/', method: 'GET', timeout: 700 }, function (res) {
+      let body = '';
+      res.on('data', function (d) { body += d; });
+      res.on('end', function () {
+        resolve(res.statusCode === 401 ? /dsh web authentication required/i.test(body) : res.statusCode === 200);
+      });
+    });
+    req.on('error', function () { resolve(false); });
+    req.on('timeout', function () { req.destroy(); resolve(false); });
+    req.end();
+  });
+}
+async function findDesktopDshPort() {
+  const ports = desktopPorts();
+  for (const p of ports) {
+    // 工作台自己的引擎进程名也叫 DeepSeek Harness.exe（dsh web --port 3080），要排除掉
+    if (p === Number(DSH_PORT)) continue;
+    if (await probeDshWeb(p)) return p;
+  }
+  return 0;
+}
+function mintDesktopCookie(port, secretB64) {
+  const authority = '127.0.0.1:' + port;
+  const name = 'dsh-auth-' + b64url(crypto.createHash('sha256').update(authority).digest());
+  const now = Date.now();
+  const payload = { version: 1, authority: authority, issuedAt: now, expiresAt: now + 24 * 3600 * 1000 };
+  const body = b64url(Buffer.from(JSON.stringify(payload), 'utf8'));
+  const sig = b64url(crypto.createHmac('sha256', Buffer.from(secretB64, 'base64url')).update(body).digest());
+  return { name: name, value: 'v1.' + body + '.' + sig, expiresAt: payload.expiresAt };
+}
+ipcMain.handle('harness:desktop-info', async function () {
+  const port = await findDesktopDshPort();
+  const secret = readDesktopSecret();
+  return {
+    ok: !!(port && secret), port: port, hasSecret: !!secret,
+    err: !port ? '桌面版 DSH 没在运行（没找到它的 Web 服务端口）'
+      : (!secret ? '读不到桌面版 DSH 的会话密钥（%USERPROFILE%\\.dsh\\.credentials.yaml）' : '')
+  };
+});
+ipcMain.handle('harness:desktop-prepare', async function (e, webContentsId) {
+  const wc = webContents.fromId(Number(webContentsId));
+  if (!wc || wc.isDestroyed()) return { ok: false, err: 'webContents 不存在' };
+  const port = await findDesktopDshPort();
+  if (!port) return { ok: false, err: '桌面版 DSH 没在运行（没找到它的 Web 服务端口）' };
+  const secret = readDesktopSecret();
+  if (!secret) return { ok: false, err: '读不到桌面版 DSH 的会话密钥' };
+  const c = mintDesktopCookie(port, secret);
+  try {
+    await wc.session.cookies.set({
+      url: 'http://127.0.0.1:' + port + '/',
+      name: c.name,
+      value: c.value,
+      path: '/',
+      httpOnly: true,
+      sameSite: 'strict',
+      expirationDate: Math.floor(c.expiresAt / 1000)
+    });
+  } catch (err) {
+    return { ok: false, err: '写 Cookie 失败：' + ((err && err.message) || err) };
+  }
+  // 这个 webview 是"命令页里的桌面 DSH"：给它一个人肉登记，皮肤注入才认它
+  // （样式只注入这个客户端，桌面版自己的窗口不变）
+  try { desktopSkinIds.add(wc.id); applyEngineSkin(wc); } catch (e) { /* ignore */ }
+  return { ok: true, port: port, url: 'http://127.0.0.1:' + port + '/' };
+});
+// 桌面版当前会话 id（从它的 Local Storage 里读；用于让命令页自动打开同一个对话）
+function readDesktopCurrentSession() {
+  try {
+    const dir = path.join(os.homedir(), 'AppData', 'Roaming', '@deepseek-ai', 'dsh-desktop', 'Local Storage', 'leveldb');
+    const files = fs.readdirSync(dir).filter(function (f) { return /\.(log|ldb)$/.test(f); })
+      .map(function (f) { return { f: f, m: fs.statSync(path.join(dir, f)).mtimeMs }; })
+      .sort(function (a, b) { return b.m - a.m; });
+    for (const it of files) {
+      const txt = fs.readFileSync(path.join(dir, it.f)).toString('latin1');
+      let at = -1, last = '';
+      while ((at = txt.indexOf('dsh.sessions.current', at + 1)) >= 0) {
+        const m = txt.slice(at, at + 220).match(/session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/);
+        if (m) last = m[0];
+      }
+      if (last) return last;
+    }
+  } catch (e) { /* ignore */ }
+  return '';
+}
+ipcMain.handle('harness:desktop-session', () => readDesktopCurrentSession());
+ipcMain.on('harness:desktop-session-sync', function (e) {
+  e.returnValue = readDesktopCurrentSession();
+});
+ipcMain.handle('harness:desk-preload-path', () => path.join(__dirname, 'renderer', 'desk-preload.js'));
+
 // ---- IPC：版本信息（左上角品牌区悬停显示）----
 // 放主进程读的原因：版本号来自各处 package.json，渲染层没有文件系统权限；
 // 运行时版本（Electron / Chromium / Node）也只有主进程能一次拿全。
@@ -1426,7 +1559,12 @@ html[data-mem-theme] svg { border-radius: 0 !important; }
 // 引擎皮肤的当前状态（由渲染层的「孟菲斯」开关 / 外观按钮驱动）
 let engineSkin = { on: true, theme: 'light' };
 const engineCssInjected = new Set();   // 每个 webContents 只 insertCSS 一次（页面重载后在 dom-ready 里清掉）
+// 「命令页直连桌面 DSH」的那个 webview：它的地址是桌面端的随机端口（不是 3080），
+// 但它同样要吃孟菲斯皮肤。注意：insertCSS 只作用在这个 webview 自己身上，
+// 桌面版 DSH 窗口是另一个客户端，不会因为这里注入而变样。
+const desktopSkinIds = new Set();
 function isEngineWebContents(wc) {
+  if (desktopSkinIds.has(wc.id)) return true;
   try { const u = wc.getURL() || ''; return u.indexOf(BASE) === 0; } catch (e) { return false; }
 }
 function applyEngineSkin(wc) {
@@ -1457,7 +1595,7 @@ app.on('web-contents-created', function (e, wc) {
     engineCssInjected.delete(wc.id);
     applyEngineSkin(wc);
   });
-  wc.on('destroyed', function () { engineCssInjected.delete(wc.id); });
+  wc.on('destroyed', function () { engineCssInjected.delete(wc.id); desktopSkinIds.delete(wc.id); });
 });
 const HARNESS_FIX_JS = `(() => {
   const pick = () => {

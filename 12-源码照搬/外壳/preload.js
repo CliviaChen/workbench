@@ -30,6 +30,11 @@ contextBridge.exposeInMainWorld('app', {
   },
   getHarnessUrl: () => ipcRenderer.invoke('harness:url'),
   isHarnessReady: () => ipcRenderer.invoke('harness:ready'),
+  // 命令页直连桌面版 DSH：探端口 / 给目标 webview 灌签名 Cookie
+  desktopHarnessInfo: () => ipcRenderer.invoke('harness:desktop-info'),
+  prepareDesktopHarness: (webContentsId) => ipcRenderer.invoke('harness:desktop-prepare', webContentsId),
+  desktopCurrentSession: () => ipcRenderer.invoke('harness:desktop-session'),
+  deskPreloadPath: () => ipcRenderer.invoke('harness:desk-preload-path'),
   // 版本信息（左上角品牌区悬停显示）：GUI / 引擎 / Electron·Chromium·Node
   getVersion: () => ipcRenderer.invoke('app:version'),
   // ---- 壳侧能力位（渲染层据此决定"敢不敢用"某个新策略）----

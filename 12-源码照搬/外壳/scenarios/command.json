@@ -19,6 +19,7 @@
    "title": "AI·命令",
    "sub": "",
    "type": "harness",
+   "harnessSource": "desktop",
    "col": 4,
    "row": 1,
    "w": 1,

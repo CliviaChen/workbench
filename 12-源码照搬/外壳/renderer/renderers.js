@@ -14104,6 +14104,7 @@ renderers.harness = (body, meta, head) => {
   let wv = null;
   let hostTimer = null;   // 加载后 30s 注入兜底窗口
   let pinTimer = null;    // 常驻钉住重注入（5s）
+  let deskTimer = null;   // 直连桌面版时：每 6s 跟一下桌面版当前会话
   let disposed = false;   // 场景切换后停止一切注入
   const reloadBtn = el('button', 'file-refresh', '🔄 重新加载');
   reloadBtn.title = '重新加载对话窗口';
@@ -14161,11 +14162,13 @@ renderers.harness = (body, meta, head) => {
   // 没写 pinTarget = 「不钉」（下面 clickItem 会直接什么都不做，交给用户自己选会话）。
   // 别再给缺省值塞历史默认「oa系统运维」：那会让主标签的「工作台」对话面板跑去找 OA 会话、
   // 甚至点到别的会话上去（2026-09-19 去掉这个默认值）。
-  const rawPin = (meta && meta.pinTarget) || '';
+  // 命令页可配 harnessSource:'desktop'：直连桌面版 DSH（工作区/对话与桌面版同源）
+  const desktopSource = !!(meta && meta.harnessSource === 'desktop');
+  const rawPin = desktopSource ? '' : ((meta && meta.pinTarget) || '');
   const pinTargets = (Array.isArray(rawPin) ? rawPin : [rawPin])
     .map(t => String(t == null ? '' : t).trim()).filter(Boolean);
   const PIN_TARGETS_JS = JSON.stringify(pinTargets);
-  const PIN_SESSION_JS = JSON.stringify(String((meta && meta.sessionTitle) || '').trim());
+  const PIN_SESSION_JS = JSON.stringify(desktopSource ? '' : String((meta && meta.sessionTitle) || '').trim());
   // ★会话 id = 身份校验（不再是"直达通道"）★ 2026-09-19 二次修正：
   //   场景 json 的 sessionId 是引擎真实 id（如 session-XXXXXXXX-…），面板拿它来**核对**
   //   「画面上这条会话是不是我要的那条」——因为会话行 DOM 里没有 id，只有标题，而本机真的
@@ -14174,7 +14177,7 @@ renderers.harness = (body, meta, head) => {
   //     2026-09-19 三次定稿后**已按新前提重新启用**（一板一分区 ⇒ 各写各的键，见下方 ⓪）。
   //   ⚠ 早先"这些面板里侧栏压根不在 DOM 里、点行不可靠"的说法（2026-09-14）也已作废：
   //     2026-09-19 探针实测：侧栏会话行**加载后 1 秒内就在 DOM 里**（[role="treeitem"] 有 7~8 行），点行有效。
-  const PIN_SESSION_ID_JS = JSON.stringify(String((meta && meta.sessionId) || '').trim());
+  const PIN_SESSION_ID_JS = JSON.stringify(desktopSource ? '' : String((meta && meta.sessionId) || '').trim());
   // 面板身份：分区现在是**一板一分区**（见 panelPartition 与 webview 处的说明），但"记住的会话标题"
   // 仍然按面板分键存 —— 面板重建、场景里换了会话 id 时它还要用，换分区不影响这个键的用途。
   const PANEL_KEY = String((meta && meta.id) || (meta && meta.scenario) || 'ai').replace(/[^A-Za-z0-9_-]/g, '') || 'ai';
@@ -14960,18 +14963,55 @@ renderers.harness = (body, meta, head) => {
   document.addEventListener('kneu:folder', onNeuronFolder);
   document.addEventListener('kneu:memory', onNeuronMemory);
 
+  const waitWcId = (el) => new Promise((resolve) => {
+    let n = 0;
+    const tick = () => {
+      let id = -1;
+      try { id = el.getWebContentsId(); } catch (e) { /* ignore */ }
+      if (id && id !== -1) return resolve(id);
+      if (++n > 80) return resolve(-1);
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+
+  let desktopAppliedSid = '';
+  const seedDesktopSession = async () => {
+    if (!desktopSource || !wv || !wv.executeJavaScript) return;
+    try {
+      const sid = await window.app.desktopCurrentSession();
+      if (!sid || sid === desktopAppliedSid) return;
+      await wv.executeJavaScript("try{localStorage.setItem('dsh.sessions.current', JSON.stringify({sessionId:'" + sid + "'}))}catch(e){}; 'ok'");
+      desktopAppliedSid = sid;
+      wv.reload();
+    } catch (e) { /* ignore */ }
+  };
+
   const load = async () => {
     if (disposed) return;
     try {
-      const ready = await window.app.isHarnessReady();
-      if (!ready) {
-        msg.textContent = 'Harness 引擎尚未就绪。请稍候或点击「重试」。';
-        const retry = el('button', 'file-refresh', '🔄 重试');
-        retry.addEventListener('click', () => { msg.textContent = '正在加载对话窗口…'; load(); });
-        msg.appendChild(retry);
-        return;
+      let url = '';
+      if (desktopSource) {
+        const info = await window.app.desktopHarnessInfo();
+        if (!info || !info.ok) {
+          msg.textContent = '直连桌面版 DSH 失败：' + ((info && info.err) || '桌面版 DSH 不可用');
+          const retry = el('button', 'file-refresh', '🔄 重试');
+          retry.addEventListener('click', () => { msg.textContent = '正在连接桌面版 DSH…'; load(); });
+          msg.appendChild(retry);
+          return;
+        }
+        url = 'about:blank';
+      } else {
+        const ready = await window.app.isHarnessReady();
+        if (!ready) {
+          msg.textContent = 'Harness 引擎尚未就绪。请稍候或点击「重试」。';
+          const retry = el('button', 'file-refresh', '🔄 重试');
+          retry.addEventListener('click', () => { msg.textContent = '正在加载对话窗口…'; load(); });
+          msg.appendChild(retry);
+          return;
+        }
+        url = await window.app.getHarnessUrl();
       }
-      const url = await window.app.getHarnessUrl();
       body.innerHTML = '';
       wv = document.createElement('webview');
       wv.className = 'harness-wv';
@@ -14984,6 +15024,12 @@ renderers.harness = (body, meta, head) => {
       //   没带 sessionId 的面板仍然退回 soloHarnessPartition()（主窗口 = persist:harness，与主标签同分区）。
       wv.setAttribute('partition', panelPartition(meta));
       wv.setAttribute('allowpopups', '');
+      if (desktopSource) {
+        try {
+          const pp = await window.app.deskPreloadPath();
+          if (pp) wv.setAttribute('preload', 'file:///' + String(pp).replace(/\\/g, '/'));
+        } catch (e) { /* ignore */ }
+      }
       wv.addEventListener('dom-ready', injectFix);
       wv.addEventListener('did-finish-load', injectFix);
       // 主进程通道 + 宿主定时兜底：加载后前 30 秒每 1.5 秒重注入
@@ -15003,6 +15049,22 @@ renderers.harness = (body, meta, head) => {
       }, 5000);
       wv.setAttribute('src', url);
       body.appendChild(wv);
+      if (desktopSource) {
+        const id = await waitWcId(wv);
+        if (id === -1) { msg.textContent = '直连桌面版 DSH 失败：webview 没拿到 webContents'; return; }
+        const prep = await window.app.prepareDesktopHarness(id);
+        if (!prep || !prep.ok) {
+          msg.textContent = '直连桌面版 DSH 失败：' + ((prep && prep.err) || '未知错误');
+          return;
+        }
+        diag.textContent = '直连桌面 DSH · :' + prep.port;
+        wv.setAttribute('src', prep.url);
+        // 等页面与应用都初始化完，再把桌面版当前会话写进去并刷一次
+        // （太早写会被 DSH 自己的会话持久化覆盖，这是实测结论）
+        setTimeout(() => { seedDesktopSession(); }, 2500);
+        if (deskTimer) clearInterval(deskTimer);
+        deskTimer = setInterval(seedDesktopSession, 8000);
+      }
     } catch (e) {
       msg.textContent = '加载失败：' + (e && e.message || e);
     }
@@ -15013,6 +15075,7 @@ renderers.harness = (body, meta, head) => {
     disposed = true;
     document.removeEventListener('kneu:folder', onNeuronFolder);
     document.removeEventListener('kneu:memory', onNeuronMemory);
+    if (deskTimer) clearInterval(deskTimer);
     if (hostTimer) clearInterval(hostTimer);
     if (pinTimer) clearInterval(pinTimer);
   };
