@@ -927,7 +927,7 @@ function initBoot() {
     overlay.classList.toggle('err', v.stage === 'error');
     // 冷启动兜底（2026-11 本机适配）：引擎就绪的进度能收到、但 main 的 harness:ready 事件可能已错过
     // ⇒ 加载页会永远停在 92%。这里在"引擎已就绪"这一帧主动触发一次加载（loadHarness 幂等）。
-    if (v.stage === 'ready' && webview && !webview.getAttribute('src')) {
+    if (v.stage === 'ready' && document.querySelector('.tab[data-sc-id="harness"]') && webview && !webview.getAttribute('src')) {
       setTimeout(function () { try { loadHarness(); } catch (e) { /* ignore */ } }, 200);
     }
     if (typeof v.pct === 'number' && v.pct > curPct) {
@@ -1108,16 +1108,25 @@ async function init() {
   safeStep('标题栏', () => initTitlebar());
   safeStep('外观', () => initTheme());      // 深色 / 浅色 / 跟随系统
   safeStep('孟菲斯开关', () => initMemphisToggle());
-  safeStep('余额', () => initBalance());    // DeepSeek 平台余额
   safeStep('加载页', () => initBoot());     // 引擎启动进度条 + 失败重试
-  // 引擎就绪 → 自动加载主界面（不等用户点标签）；webview 加载完成 → 收起加载页
-  safeStep('引擎就绪监听', () => { if (window.app.onHarnessReady) window.app.onHarnessReady(() => { loadHarness(); }); });
-  // 兜底（2026-11 本机适配）：窗口比引擎晚就绪、或 ready 事件在监听注册前就发过时，
-  // onHarnessReady 永远不会再来 ⇒ 界面会一直停在 92%「引擎已就绪，正在加载界面」的加载页。
-  // 这里启动后自查一次（loadHarness 自己幂等：src 相同就只收加载页）。
-  Promise.resolve(window.app.isHarnessReady && window.app.isHarnessReady())
-    .then(function (ok) { if (ok) loadHarness(); })
-    .catch(function () { /* ignore */ });
+  // 引擎就绪 → 收掉启动加载页（原来还要等场景 0 的 DSH 界面渲染；那个页面已删除）
+  safeStep('引擎就绪监听', () => {
+    let tries = 0;
+    const timer = setInterval(async () => {
+      let ok = false;
+      try { ok = await window.app.isHarnessReady(); } catch (e) { ok = false; }
+      if (ok) {
+        clearInterval(timer);
+        try { if (window.__bootFinish) window.__bootFinish(); } catch (e) { /* ignore */ }
+        return;
+      }
+      if (++tries > 120) {
+        clearInterval(timer);
+        try { if (window.__bootFinish) window.__bootFinish(); } catch (e) { /* ignore */ }
+      }
+    }, 300);
+    if (window.app.onHarnessReady) window.app.onHarnessReady(() => { try { if (window.__bootFinish) window.__bootFinish(); } catch (e) { /* ignore */ } });
+  });
   safeStep('webview 加载监听', () => {
     webview.addEventListener('did-finish-load', () => {
       // 文档加载完 ≠ 界面可用：Harness 是 SPA，继续等它渲染出真实 UI 再收起加载页
@@ -1232,6 +1241,7 @@ async function init() {
   // 命令（command，2026-10-26）：迷你神经元网（6 蓝节点 + 1 琥珀核心 + 连线）—— 与 renderers.js 的 SCENARIO_ICONS['command'] 同一份。
   const NEURON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.7 4.5 8 2.9l4.4 1.7M3 8.4l.7-3.9M8 2.9l.4 5.2M12.4 4.6 8.4 8.1M8.4 8.1l3.8 3.4M8.4 8.1l-3.8 4.1M3 8.4l5.4-.3" stroke="#8fb4ff" stroke-width=".85" stroke-linecap="round" opacity=".6"/><circle cx="3.7" cy="4.5" r="1.45" fill="#8fb4ff"/><circle cx="8" cy="2.9" r="1.15" fill="#8fb4ff" opacity=".85"/><circle cx="12.4" cy="4.6" r="1.25" fill="#8fb4ff"/><circle cx="3" cy="8.4" r="1.05" fill="#8fb4ff" opacity=".8"/><circle cx="8.4" cy="8.1" r="1.85" fill="#f0a35e"/><circle cx="12.2" cy="11.5" r="1.15" fill="#8fb4ff" opacity=".85"/><circle cx="4.6" cy="12.2" r="1.05" fill="#8fb4ff" opacity=".8"/></svg>';
   const ICONS = {
+    'control-room': 'assets/control-room.svg',   // 控制室（插件自带矢量图标）
   'bilibili': 'assets/bilibili-icon.png',
     'douyin': 'assets/douyin-icon.png',   // 2026-10-26 宿主新建「刷抖音」场景（抖音官方 favicon）   // 2026-10-19 宿主新建「B站」场景（官方 favicon.svg）
     'harness': 'assets/deepseek-whale.png',
@@ -1266,7 +1276,7 @@ async function init() {
     //   initScenarioTabBar），HTML5 DnD 会和它抢事件、幽灵图也丑。data-movable 只用来给光标样式。
     if (draggable) t.dataset.movable = '1';
     const ico = mkEl('span', 'tab-ico');
-    if (typeof icon === 'string' && (/\.(png|ico)$/i.test(icon) || icon.startsWith('data:image/svg+xml'))) {
+    if (typeof icon === 'string' && (/\.(png|ico|svg)$/i.test(icon) || icon.startsWith('data:image/svg+xml'))) {
       const img = document.createElement('img');
       img.className = 'tab-ico-img';
       img.src = icon;
@@ -1310,18 +1320,8 @@ async function init() {
   // 顺序的唯一权威在主进程：data\scene-tab-order.json（listScenarios() 直接按它返回），
   // 这里只提供 persist 回调把新顺序报上去。老的 HTML5 DnD + localStorage 实现已删除。
 
-  // 场景 0：Harness（默认初始界面，固定最前不可拖）
-  const tab0 = makeTab('harness', 'DSH 引擎', ICONS.harness, true, false);
-  tab0.dataset.scId = 'harness';
-  tab0.addEventListener('click', () => {
-    tabsNav.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-    tab0.classList.add('active');
-    currentTab = 'harness';
-    showView('harness');
-    loadHarness();
-  });
-  tabsNav.appendChild(tab0);
-  currentTab = 'harness';
+  // 2026-11-24：原「DSH 引擎」固定标签已移除（改用桌面版 DSH / 命令页直连）
+  currentTab = null;
 
   // 场景 1..N：本地场景。**顺序由主进程决定**（listScenarios() 已按 data\scene-tab-order.json 排好，
   // 标了 "first": true 的固定最前）⇒ 这里不再自己排一遍，避免两份顺序打架（原来那份在 localStorage 里）。
@@ -1399,12 +1399,20 @@ async function init() {
     }
   });
 
-  // 初始显示 Harness
-  showView('harness');
-  try {
-    await loadHarness();
-  } catch (err) {
-    bootFail('加载引擎界面', err);
+  // 初始显示：第一个场景（原「DSH 引擎」页已移除；启动加载页由上面「引擎就绪监听」收起）
+  const firstScene = finalList.filter(s => s.first)[0] || finalList[0];
+  showView('scenario');
+  if (firstScene) {
+    const t0 = tabsNav.querySelector('.tab[data-sc-id="' + firstScene.id + '"]');
+    if (t0) t0.classList.add('active');
+    currentTab = firstScene.id;
+    try {
+      await loadScenario(firstScene.id);
+    } catch (err) {
+      bootFail('加载初始场景', err);
+    }
+  } else {
+    try { if (window.__bootFinish) window.__bootFinish(); } catch (e) { /* ignore */ }
   }
 }
 

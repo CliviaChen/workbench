@@ -1,0 +1,3 @@
+- insert:
+    - id: control-room
+      name: '@local/control-room'

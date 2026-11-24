@@ -1,0 +1,22 @@
+{
+ "id": "control-room",
+ "name": "控制室",
+ "description": "控制室：把桌面版 DSH 的本地项目（工作区）做成状态卡片，点卡片进项目驾驶舱；数据与桌面版 DSH 同源，卡片随面板宽度重排并保持正方形。",
+ "layout": "grid",
+ "cols": 4,
+ "panels": [
+  {
+   "id": "cr-main",
+   "title": "控制室",
+   "sub": "",
+   "type": "harness",
+   "harnessSource": "desktop",
+   "controlRoom": true,
+   "col": 1,
+   "row": 1,
+   "w": 4,
+   "h": 6
+  }
+ ],
+ "first": false
+}

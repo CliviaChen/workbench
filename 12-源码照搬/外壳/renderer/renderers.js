@@ -11727,15 +11727,7 @@ var WEB_AI = [
   { key: 'deepseek', name: 'DeepSeek', icon: 'assets/webai/deepseek.png', fallback: 'D',
     url: 'https://chat.deepseek.com/', partition: 'persist:embed-sr-site-bl',
     userAgent: 'chrome', noWarm: true,
-    tip: '与自我复盘场景的 DeepSeek 面板共用登录态（同一个 webview 分区）' },
-  { key: 'doubao', name: '豆包', icon: 'assets/webai/doubao.png', fallback: '豆',
-    url: 'https://www.doubao.com/chat/' },
-  { key: 'tongyi', name: '通义千问', icon: 'assets/webai/tongyi.png', fallback: '通',
-    url: 'https://tongyi.aliyun.com/qianwen/' },
-  { key: 'chatglm', name: '智谱清言', icon: 'assets/webai/chatglm.png', fallback: '智',
-    url: 'https://chatglm.cn/main/alltoolsdetail' },
-  { key: 'kimi', name: 'Kimi', icon: 'assets/webai/kimi.png', fallback: 'K',
-    url: 'https://www.kimi.com/' },
+    tip: '与自我复盘场景的 DeepSeek 面板共用登录态（同一个 webview 分区）' }
 ];
 
 // ★状态为什么挂在 window 上★ ⟳ 会**重新求值本文件**却**不重建 DOM**（同一个页面上下文）：
@@ -14105,6 +14097,8 @@ renderers.harness = (body, meta, head) => {
   let hostTimer = null;   // 加载后 30s 注入兜底窗口
   let pinTimer = null;    // 常驻钉住重注入（5s）
   let deskTimer = null;   // 直连桌面版时：每 6s 跟一下桌面版当前会话
+  let crTimer = null;     // 控制室：每 2s 尝试打开（直到 .cr-root 出现）
+  let crOpened = false;
   let disposed = false;   // 场景切换后停止一切注入
   const reloadBtn = el('button', 'file-refresh', '🔄 重新加载');
   reloadBtn.title = '重新加载对话窗口';
@@ -14163,7 +14157,9 @@ renderers.harness = (body, meta, head) => {
   // 别再给缺省值塞历史默认「oa系统运维」：那会让主标签的「工作台」对话面板跑去找 OA 会话、
   // 甚至点到别的会话上去（2026-09-19 去掉这个默认值）。
   // 命令页可配 harnessSource:'desktop'：直连桌面版 DSH（工作区/对话与桌面版同源）
-  const desktopSource = !!(meta && meta.harnessSource === 'desktop');
+  // controlRoom:true = 同一套直连，但进入后自动打开 DSH 的「控制室」面板（v1：嵌的是桌面版已装的插件）
+  const controlRoom = !!(meta && meta.controlRoom);
+  const desktopSource = !!(meta && (meta.harnessSource === 'desktop' || controlRoom));
   const rawPin = desktopSource ? '' : ((meta && meta.pinTarget) || '');
   const pinTargets = (Array.isArray(rawPin) ? rawPin : [rawPin])
     .map(t => String(t == null ? '' : t).trim()).filter(Boolean);
@@ -14975,9 +14971,74 @@ renderers.harness = (body, meta, head) => {
     tick();
   });
 
+  const OPEN_CR_JS = `(async function () {
+    var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+    // 固定四列：卡片宽度随面板宽度走，行数随项目数增加；.cr-card 自带 aspect-ratio:1/1 ⇒ 始终正方形
+    function applyAll() {
+      var gs = document.querySelectorAll('.cr-grid');
+      for (var i = 0; i < gs.length; i++) {
+        var g = gs[i];
+        // 4 列固定；单张卡片最大 200px（面板更窄时等比缩），保持正方形
+        g.style.setProperty('grid-template-columns', 'repeat(4, minmax(0, 200px))', 'important');
+        g.style.setProperty('justify-content', 'center', 'important');
+        g.style.setProperty('max-width', 'none', 'important');
+        g.style.setProperty('width', '100%', 'important');
+        g.style.setProperty('justify-items', 'stretch', 'important');
+        var cs = g.querySelectorAll('.cr-card');
+        for (var j = 0; j < cs.length; j++) cs[j].style.setProperty('width', '100%', 'important');
+      }
+      return gs.length;
+    }
+    // 插件每次回列表都会重建 .cr-grid（React 重渲染），所以装一个观察器持续纠正，
+    // 否则从项目驾驶舱返回后会退回插件自己算出的 1 列。
+    function install() {
+      if (window.__crFitInstalled) return;
+      window.__crFitInstalled = true;
+      try {
+        var raf = 0;
+        var kick = function () {
+          if (raf) return;
+          raf = requestAnimationFrame(function () { raf = 0; applyAll(); });
+        };
+        new MutationObserver(kick).observe(document.body, { childList: true, subtree: true });
+        window.addEventListener('resize', kick);
+        setInterval(applyAll, 1200);
+      } catch (e) { /* ignore */ }
+    }
+    install();
+    for (var i = 0; i < 8; i++) {
+      if (document.querySelector('.cr-root')) { applyAll(); return 'open'; }
+      var b = document.querySelector('.cr-sideEntry');
+      if (!b) {
+        var btns = Array.prototype.slice.call(document.querySelectorAll('button[aria-label]'));
+        b = btns.filter(function (x) { return x.getAttribute('aria-label') === '控制室'; })[0];
+      }
+      if (b) { try { b.click(); } catch (e) { /* ignore */ } }
+      await sleep(350);
+    }
+    applyAll();
+    return document.querySelector('.cr-root') ? 'open' : 'timeout';
+  })()`;
+  // 控制室：卡片随面板宽度自动加列，但保持 1:1 正方形（.cr-card 自带 aspect-ratio）
+  const CR_CSS = [
+    '.cr-root{max-width:none !important;}',
+    '.cr-grid{grid-template-columns:repeat(4,minmax(0,200px)) !important;justify-content:center !important;max-width:none !important;width:100% !important;}',
+    '.cr-card{aspect-ratio:1/1 !important;width:100% !important;}'
+  ].join('\n');
+  const injectControlRoomCss = () => {
+    if (!controlRoom || !wv || !wv.insertCSS) return;
+    try { const p = wv.insertCSS(CR_CSS); if (p && p.catch) p.catch(function () { /* ignore */ }); } catch (e) { /* ignore */ }
+  };
+  const openControlRoom = () => {
+    if (!controlRoom || !wv || !wv.executeJavaScript) return;
+    wv.executeJavaScript(OPEN_CR_JS).then(function (r) {
+      if (r === 'open') crOpened = true;
+    }).catch(function () { /* ignore */ });
+  };
+
   let desktopAppliedSid = '';
   const seedDesktopSession = async () => {
-    if (!desktopSource || !wv || !wv.executeJavaScript) return;
+    if (!desktopSource || controlRoom || !wv || !wv.executeJavaScript) return;
     try {
       const sid = await window.app.desktopCurrentSession();
       if (!sid || sid === desktopAppliedSid) return;
@@ -15032,6 +15093,7 @@ renderers.harness = (body, meta, head) => {
       }
       wv.addEventListener('dom-ready', injectFix);
       wv.addEventListener('did-finish-load', injectFix);
+      wv.addEventListener('did-finish-load', () => { crOpened = false; injectControlRoomCss(); if (controlRoom) openControlRoom(); });
       // 主进程通道 + 宿主定时兜底：加载后前 30 秒每 1.5 秒重注入
       hostTimer = setInterval(() => {
         if (disposed) return;
@@ -15057,13 +15119,20 @@ renderers.harness = (body, meta, head) => {
           msg.textContent = '直连桌面版 DSH 失败：' + ((prep && prep.err) || '未知错误');
           return;
         }
-        diag.textContent = '直连桌面 DSH · :' + prep.port;
+        diag.textContent = controlRoom ? '控制室 · 桌面 DSH' : ('直连桌面 DSH · :' + prep.port);
         wv.setAttribute('src', prep.url);
         // 等页面与应用都初始化完，再把桌面版当前会话写进去并刷一次
         // （太早写会被 DSH 自己的会话持久化覆盖，这是实测结论）
-        setTimeout(() => { seedDesktopSession(); }, 2500);
-        if (deskTimer) clearInterval(deskTimer);
-        deskTimer = setInterval(seedDesktopSession, 8000);
+        if (!controlRoom) {
+          setTimeout(() => { seedDesktopSession(); }, 2500);
+          if (deskTimer) clearInterval(deskTimer);
+          deskTimer = setInterval(seedDesktopSession, 8000);
+        } else {
+          // 控制室：等 DSH 起来后点侧栏底部的「控制室」入口，把面板打开
+          openControlRoom();
+          if (crTimer) clearInterval(crTimer);
+          crTimer = setInterval(openControlRoom, 1500);
+        }
       }
     } catch (e) {
       msg.textContent = '加载失败：' + (e && e.message || e);
@@ -15076,6 +15145,7 @@ renderers.harness = (body, meta, head) => {
     document.removeEventListener('kneu:folder', onNeuronFolder);
     document.removeEventListener('kneu:memory', onNeuronMemory);
     if (deskTimer) clearInterval(deskTimer);
+    if (crTimer) clearInterval(crTimer);
     if (hostTimer) clearInterval(hostTimer);
     if (pinTimer) clearInterval(pinTimer);
   };

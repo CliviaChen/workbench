@@ -5227,12 +5227,8 @@ if (!gotLock) {
 // 安全：只监听 127.0.0.1，不对外；claim 机制保证多窗口时只有一个窗口干活（不会问两遍）。
 const WEB_AI_PORT = Number(process.env.WEB_AI_PORT || 31239);
 const WEB_AI_KEYS = [
-  { key: 'deepseek', name: 'DeepSeek', url: 'https://chat.deepseek.com/' },
-  { key: 'doubao', name: '豆包', url: 'https://www.doubao.com/chat/' },
-  { key: 'tongyi', name: '通义千问', url: 'https://tongyi.aliyun.com/qianwen/' },
-  { key: 'chatglm', name: '智谱清言', url: 'https://chatglm.cn/main/alltoolsdetail' },
-  { key: 'kimi', name: 'Kimi', url: 'https://www.kimi.com/' }
-];   // ⚠ 这份表必须和 renderer\renderers.js 的 WEB_AI 一致（check-gui.mjs 会比对）
+  { key: 'deepseek', name: 'DeepSeek', url: 'https://chat.deepseek.com/' }
+];   // 2026-11-24：按需求只保留 DeepSeek（其它网页版 AI 入口已移除）
 const webAiPending = new Map();
 let webAiSeq = 0;
 let lastFocusedWin = null;      // 由 createWindow 的 focus 事件维护（见上面那段注释：为什么必须定向派发）
