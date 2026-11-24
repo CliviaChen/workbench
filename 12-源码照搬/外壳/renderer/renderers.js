@@ -14563,6 +14563,9 @@ renderers.harness = (body, meta, head) => {
     };
     let tries = 0;
     const clickItem = () => {
+      // 神经元「文件夹模式」期间：不要抢工作区/会话（面板正停在被选中的文件夹工作区里）
+      if (window.__kneuFolderMode) { try { refreshDiag(null); } catch (e) { } return; }
+      try { if (localStorage.getItem('kneu.folderMode') === '1') { try { refreshDiag(null); } catch (e) { } return; } } catch (e) { /* ignore */ }
       // 解绑状态（场景里没给 id / 标题 / 候选名，也没有记住的绑定）→ 什么都不做：
       // 不点侧栏、不展开分组、不强制显隐，面板就停在当前会话，由用户自己选。
       if (!SESSION_ID && !SESSION_TITLE && !(TARGETS && TARGETS.length)) {
@@ -14806,6 +14809,7 @@ renderers.harness = (body, meta, head) => {
   `;
 
   const injectFix = async () => {
+    try { applyPendingFolder(); } catch (e) { /* ignore */ }
     try { await wv.insertCSS(HARNESS_CHAT_CSS); } catch (e) { /* ignore */ }
     // 拖文件进对话窗口（幂等脚本，装上监听后重复执行只返回）
     try { await wv.executeJavaScript(HARNESS_DROP_JS); } catch (e) { /* ignore */ }
@@ -14871,6 +14875,91 @@ renderers.harness = (body, meta, head) => {
     } catch (e) { /* ignore */ }
   };
 
+  // ---- 文件夹模式联动（2026-11-24）：神经元面板选中的目录 = 本面板的 DSH 工作区 ----
+  // 神经元（renderers.neuron）切文件夹时发 kneu:folder；这里把路径灌进自己的 webview：
+  //   ① POST /api/workspace/create（RPC 信封）建/取工作区；
+  //   ② 点「选择工作区」菜单里同名项，切过去；
+  //   ③ 页面里打 window.__kneuFolderMode = true，让 HARNESS_PIN_JS 停止把会话抢回来。
+  let pendingFolder = '';
+  const dshWorkspaceJs = (p) => `(async function (path) {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    if (!path) return 'no-path';
+    const uuid = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) { var r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); });
+    var ws = null;
+    try {
+      const r = await fetch('/api/workspace/create', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ type: 'client-request', rpcId: uuid(), method: 'workspace/create', payload: { args: { request: { path: path } } } })
+      });
+      const j = await r.json();
+      ws = (j && j.result && j.result.ok && j.result.value && j.result.value.workspace) || null;
+    } catch (e) { window.__kneuLastSwitch = 'create-error'; return 'create-error:' + (e && e.message || e); }
+    if (!ws) { window.__kneuLastSwitch = 'create-failed'; return 'create-failed'; }
+    // 一进文件夹模式就先把「别抢会话」的旗子插上，免得尾巴上的 pin tick 又切回去
+    window.__kneuFolderMode = true;
+    try { localStorage.setItem('kneu.folderMode', '1'); } catch (e) { /* ignore */ }
+    const title = String(ws.title || '');
+    // 会话视图里没有「选择工作区」按钮（它只在空状态首页）⇒ 点侧栏该工作区的「新建会话」，
+    // 这就是 DSH 自己的"切到某工作区"入口；工作区没有会话时会创建一个（空白会话会被复用）。
+    const want = '在“' + title + '”中新建会话';
+    for (var i = 0; i < 12; i++) {
+      const btn = Array.prototype.slice.call(document.querySelectorAll('button[aria-label]'))
+        .filter(function (b) { return b.getAttribute('aria-label') === want; })[0];
+      if (btn) {
+        btn.click();
+        window.__kneuLastSwitch = 'ok:' + title;
+        await sleep(200);
+        return 'switched:' + title;
+      }
+      await sleep(250);
+    }
+    // 回退：空状态首页的「选择工作区」菜单
+    const sel = document.querySelector('button[aria-label="选择工作区"], .WOwLGG_workspace');
+    if (sel) {
+      for (var k = 0; k < 3; k++) {
+        sel.click();
+        await sleep(350);
+        const item = Array.prototype.slice.call(document.querySelectorAll('[role="menuitem"]'))
+          .filter(function (el) {
+            var t = (el.textContent || '').trim().replace(/\\s+/g, ' ');
+            return t === title || t.indexOf(title + ' ') === 0;
+          })[0];
+        if (item) {
+          item.click();
+          window.__kneuLastSwitch = 'ok:' + title;
+          await sleep(250);
+          return 'switched:' + title;
+        }
+        await sleep(300);
+      }
+    }
+    window.__kneuLastSwitch = 'no-entry:' + title;
+    return 'no-entry:' + title;
+  })(${JSON.stringify(p)})`;
+
+  const applyPendingFolder = () => {
+    if (!pendingFolder || !wv || !wv.executeJavaScript) return;
+    try {
+      if (wv.getWebContentsId && wv.getWebContentsId() === -1) return;
+      const p = pendingFolder; pendingFolder = '';
+      wv.executeJavaScript(dshWorkspaceJs(p)).catch(function () { /* ignore */ });
+    } catch (e) { /* ignore */ }
+  };
+  const onNeuronFolder = (ev) => {
+    const d = (ev && ev.detail) || {};
+    if (!d.path) return;
+    pendingFolder = String(d.path);
+    applyPendingFolder();
+  };
+  const onNeuronMemory = () => {
+    pendingFolder = '';
+    try {
+      if (wv && wv.executeJavaScript) wv.executeJavaScript("window.__kneuFolderMode=false; try{localStorage.removeItem('kneu.folderMode')}catch(e){}").catch(function () { /* ignore */ });
+    } catch (e) { /* ignore */ }
+  };
+  document.addEventListener('kneu:folder', onNeuronFolder);
+  document.addEventListener('kneu:memory', onNeuronMemory);
+
   const load = async () => {
     if (disposed) return;
     try {
@@ -14909,6 +14998,7 @@ renderers.harness = (body, meta, head) => {
       // 常驻钉住：每 5 秒轻量重注入一次（webview 内部重载后钉住仍生效；脚本自身幂等）
       pinTimer = setInterval(() => {
         if (disposed) return;
+        try { applyPendingFolder(); } catch (e) { /* ignore */ }
         try { if (wv && wv.executeJavaScript) wv.executeJavaScript(HARNESS_PIN_JS + '\n' + HARNESS_DROP_JS).catch(function () { }); } catch (e) { /* ignore */ }
       }, 5000);
       wv.setAttribute('src', url);
@@ -14921,6 +15011,8 @@ renderers.harness = (body, meta, head) => {
   // 场景切换清理：停止注入定时器（webview DOM 由 loadScenario 统一移除）
   return () => {
     disposed = true;
+    document.removeEventListener('kneu:folder', onNeuronFolder);
+    document.removeEventListener('kneu:memory', onNeuronMemory);
     if (hostTimer) clearInterval(hostTimer);
     if (pinTimer) clearInterval(pinTimer);
   };
@@ -18537,6 +18629,8 @@ renderers.neuron = (body, meta, head) => {
       paintDepthBtns();
       applyFolderView();
       try { localStorage.setItem('kneuFolder:' + folderPid(), folderRoot); } catch (e) { /* ignore */ }
+      // 联动：让同一场景里的 DSH 对话面板把这个目录也切成它的工作区
+      try { document.dispatchEvent(new CustomEvent('kneu:folder', { detail: { path: folderRoot } })); } catch (e) { /* ignore */ }
       return true;
     }).catch(function (e) {
       stat.textContent = '扫不了这个文件夹：' + ((e && e.message) || e);
@@ -18559,6 +18653,8 @@ renderers.neuron = (body, meta, head) => {
     search.placeholder = '搜场景 / 技能 / 文件…';
     if (headNote) headNote.textContent = '共享记忆 · 只读';
     try { localStorage.removeItem('kneuFolder:' + folderPid()); } catch (e) { /* ignore */ }
+    // 联动：告诉 DSH 面板退出「文件夹工作区」模式，恢复原来的会话钉住
+    try { document.dispatchEvent(new CustomEvent('kneu:memory')); } catch (e) { /* ignore */ }
     return load();
   }
 
